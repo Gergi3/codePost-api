@@ -1907,7 +1907,8 @@ class Environment(BaseModel):
       ('node-18', 'node-18'),
       ('r-4', 'r-4'),
       ('ruby', 'ruby'),
-      ('php', 'php')), default='python-3.7')
+      ('php', 'php'),
+      ('other', 'other')), default='python-3.7')
   buildType = models.CharField(max_length=25, choices=(
       ('default', 'default'),
       ('alpine', 'alpine'),
