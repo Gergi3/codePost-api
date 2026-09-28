@@ -148,8 +148,9 @@ class JavaExecutor(Executor):
                 f"java -ea -cp . {shlex.quote(run_classname)}"
             )
             
-        command = ["sh", "-c", cmd_str]
-        
+        base_command = ["sh", "-c", cmd_str]
+        command = self._wrap_command_with_pre_script(base_command)
+
         container = self.get_container(
             image_name=self.image,
             command=command,
@@ -162,7 +163,8 @@ class JavaExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        self.add_pre_script(container)
+
         try:
             container.start()
             result = container.wait(timeout=self.DEFAULT_TIMEOUT)
