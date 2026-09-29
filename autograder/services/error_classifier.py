@@ -40,6 +40,14 @@ _CATEGORY_SIGNALS = [
         'undefined reference',
         'unexpected token',
     ]),
+    # A category may appear more than once so a specific signal can outrank a
+    # generic one that would otherwise match first. The container never ran
+    # here (payload pushed through argv, see Executor._put_file), so this is
+    # infra even though the surrounding text says "missing markers".
+    ('infra', [
+        'argument list too long',
+        'e2big',
+    ]),
     ('marker_extraction', [
         'missing markers',
         'failed to extract results',

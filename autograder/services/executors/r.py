@@ -93,29 +93,22 @@ class RExecutor(Executor):
         docker_env = self._get_docker_environment()
         
         # Strategy:
-        # 1. Write user code to 'student.R' (avoids ARG_MAX and enables source(print.eval=TRUE))
-        # 2. Write wrapper template to 'wrapper.R'
+        # 1. Stage user code as 'student.R' (template.r sources it; enables source(print.eval=TRUE))
+        # 2. Stage the wrapper template as '.codepost_runner.R' (self-deleting)
         # 3. Install packages
         # 4. Run wrapper
-        
-        student_filename = "student.R"
-        user_code_b64 = base64.b64encode(code.encode('utf-8')).decode('utf-8')
-        write_student_cmd = f"echo '{user_code_b64}' | base64 -d > {student_filename}"
+        # Both files go in via _put_file before start — never through argv
+        # (Linux caps one argument at 128 KiB).
 
-        wrapper_filename = "wrapper.R"
+        student_filename = "student.R"
+        runner_filename = ".codepost_runner.R"
         # Template should be raw (no code injection needed as it sources student.R)
-        # We pass empty string to _get_code_template if it still expects args, or just get the raw template
-        # Since _get_code_template injects code, we can pass "" for code, assuming template.r has no #{FILLER_CODE} anymore.
-        # But wait, _get_code_template calls replace("#{FILLER_CODE}", code).
-        # We cleaned template.r, so replace will just do nothing.
-        template_content = self._get_code_template("", packages_to_install, self.test_code or "") 
+        # _get_code_template's replace("#{FILLER_CODE}", "") is a no-op for template.r.
+        template_content = self._get_code_template("", packages_to_install, self.test_code or "")
         if not template_content:
              return ExecutionResult.error("Failed to get code template")
 
-        template_b64 = base64.b64encode(template_content.encode('utf-8')).decode('utf-8')
-        write_wrapper_cmd = f"echo '{template_b64}' | base64 -d > {wrapper_filename}"
-        
-        install_cmd = ""
+        run_cmd = f"Rscript /work/{runner_filename}"
         if packages_to_install:
             # Construct R installation script
             pkgs_list = ", ".join([f"'{p}'" for p in packages_to_install])
@@ -125,12 +118,9 @@ class RExecutor(Executor):
                 f"new_pkgs <- pkgs[!(pkgs %in% installed.packages()[,'Package'])]; "
                 f"if(length(new_pkgs)) install.packages(new_pkgs)"
             )
-            install_cmd = f" && Rscript -e \"{install_script}\""
-            
-        run_cmd = f" && Rscript {wrapper_filename}"
-        
-        full_cmd_str = f"{write_student_cmd} && {write_wrapper_cmd}{install_cmd}{run_cmd}"
-        command = ["sh", "-c", full_cmd_str]
+            command = ["sh", "-c", f"Rscript -e \"{install_script}\" && {run_cmd}"]
+        else:
+            command = ["Rscript", f"/work/{runner_filename}"]
         
         # Volumes
         import shutil
@@ -155,7 +145,9 @@ class RExecutor(Executor):
             return ExecutionResult.error("Failed to create Docker container")
             
         self.add_additional_files(container)
-        
+        self._put_file(container, '/work', student_filename, code)
+        self._put_file(container, '/work', runner_filename, template_content)
+
         try:
             container.start()
             adjusted_timeout = timeout + (30 * len(packages_to_install))
@@ -224,7 +216,8 @@ class RNotebookExecutor(NotebookExecutor):
     DOCKER_IMAGE = "r-base:latest"
     EXECUTABLE_EXTENSIONS = ['.ipynb']
     EXECUTABLE_EXTENSIONS = ['.ipynb']
-    EXECUTION_COMMAND = ["Rscript", "-e"]
+    EXECUTION_COMMAND = ["Rscript"]
+    RUNNER_FILENAME = ".codepost_runner.R"
     
     INIT_DOCKER_VOLUME = {
          "codepost-r-library": {
@@ -268,13 +261,7 @@ class RNotebookExecutor(NotebookExecutor):
         test_code_b64 = base64.b64encode(test_code.encode('utf-8')).decode('utf-8') if test_code else ""
         template = template.replace('{test_code_b64}', test_code_b64)
         return template
-    
-    def _get_execution_command(self, template: str) -> List[str]:
-        # R needs the template written to a file first
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{template_b64}' | base64 -d > /tmp/notebook.R && Rscript /tmp/notebook.R"
-        return ["sh", "-c", cmd_str]
-    
+
     def _needs_network(self, packages_to_install: List[str]) -> bool:
         # R always needs network for base64enc/jsonlite packages
         return True

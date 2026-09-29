@@ -1,4 +1,12 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+
+# The executor stages this script as /work/.codepost_runner.rb; delete it first
+# thing (Ruby has already read the whole file). Guarded by name for local/test runs.
+begin
+  File.delete(__FILE__) if File.basename(__FILE__).start_with?(".codepost_runner")
+rescue StandardError
+end
+
 require 'json'
 require 'base64'
 require 'stringio'

@@ -43,8 +43,8 @@ Each supported language has a **template file** in this directory that serves as
     - `#{FILLER_CODE}` — base64-encoded student code
     - `#{TEST_CODE}` — base64-encoded instructor test script
     - `#{TARGET_TEST_FUNCTION}` — specific test function to run (or empty for all)
-4. Creates Docker container with resource limits and security constraints
-5. Injects additional files (other submission files, assignment files, datasets) via tar
+4. Creates Docker container with resource limits and security constraints. The command is short (`python /work/.codepost_runner.py`) — the rendered template is **never** passed through argv, because Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) and a large notebook would fail at start with `argument list too long`.
+5. Injects additional files (other submission files, assignment files, datasets) via tar, then stages the rendered template as `/work/.codepost_runner.py` with `Executor._put_file` (`put_archive` into the container's writable layer — never the image). The template unlinks itself as its first statement, so it is on disk only until the interpreter has read it. Compiled languages (Java, C++) `rm` their runner sources right after compiling.
 6. Starts container, waits with timeout
 7. Captures stdout/stderr, demultiplexes Docker stream
 8. Parses output markers:
@@ -262,23 +262,34 @@ Use an existing template (e.g., `template.py` or `template.js`) as a reference.
 Create `autograder/services/executors/your_lang.py`:
 
 ```python
-from autograder.services.executors.base import Executor
+from autograder.services.executors.base import Executor, NotebookExecutor
 
 class YourLangExecutor(Executor):
-    TEMPLATE_FILE = "template.yourlang"
-    EXTENSIONS = [".yl"]  # file extensions this executor handles
+    TEMPLATE = "template.yourlang"
+    EXECUTABLE_EXTENSIONS = [".yl"]  # file extensions this executor handles
     LANGUAGE = "your-lang"  # matches the Environment.language choice
-    CACHE_VOLUME = "codepost-yourlang-cache"  # optional, for package caching
+    DOCKER_IMAGE = "yourlang:latest"
 
-    def build_command(self, script_content: str) -> list[str]:
-        """Return the Docker CMD to execute the template."""
-        return ["yourlang", "-e", script_content]
+    def execute(self) -> ExecutionResult:
+        template = self._get_code_template(...)
+        # Short command only — never the template itself (128 KiB argv limit)
+        runner_filename = ".codepost_runner.yl"
+        command = ["yourlang", f"/work/{runner_filename}"]
+        container = self.get_container(image_name=self.image, command=command, ...)
+        self.add_additional_files(container)
+        self._put_file(container, '/work', runner_filename, template)  # before start()
+        container.start()
+        ...
 
-    def get_requirements(self, file_content: str) -> list[str]:
-        """Detect imports/dependencies from student code."""
-        # Parse the student's file and return package names
-        return []
+class YourLangNotebookExecutor(NotebookExecutor):
+    TEMPLATE = "notebook_template.yourlang"
+    EXECUTION_COMMAND = ["yourlang"]          # interpreter prefix
+    RUNNER_FILENAME = ".codepost_runner.yl"   # staged into /work by the base execute()
+    # Base execute() runs: EXECUTION_COMMAND + ["/work/" + RUNNER_FILENAME].
+    # Override _get_runner_files()/_get_execution_command() for compiled languages.
 ```
+
+Commands are either a plain argv list of short tokens or `["sh", "-c", "<short string>"]`; the pre-script and stdin wrappers join tokens with `shlex.join`, so both shapes nest safely.
 
 Register it in `autograder/services/executors/__init__.py` so the factory can discover it.
 
@@ -314,7 +325,7 @@ If your language supports notebook execution, create `notebook_template.yourlang
 
 ### Template Gotchas
 
-1. **Base64 encoding is critical** — Student code is base64-encoded to avoid shell injection and escaping issues. Your template must decode it before execution. Never pass raw student code through shell interpolation.
+1. **Base64 encoding is critical** — Student code is base64-encoded *inside the template* to avoid shell injection and escaping issues. Your template must decode it before execution. Never pass raw student code through shell interpolation — and never put the rendered template itself into the container command: stage it with `Executor._put_file` (see Execution Flow).
 
 2. **The `<<<RESULT>>>` marker matters** — Everything before this marker is treated as "system logs" (package install output, etc.). Everything after is "student output". If you forget this marker, all output gets mixed together.
 
@@ -346,9 +357,11 @@ If your language supports notebook execution, create `notebook_template.yourlang
 
 14. **Image versioning** — Each build increments `current_build_version`. Max 3 versions are kept. If a convergence update breaks things, the system can roll back to a previous version.
 
-15. **`compileText` runs before everything** — The Environment's `compileText` field is prepended to the execution command. This is meant for compilation steps (e.g., `javac *.java`) but instructors put arbitrary shell commands here. Your executor must support this.
+15. **`compileText` runs before everything** — The Environment's `compileText` field is staged as `/work/.pre_script.sh` and the command becomes `sh ./.pre_script.sh && rm .pre_script.sh && <command>` (`_wrap_command_with_pre_script`, joined with `shlex.join` so any command shape survives). This is meant for compilation steps (e.g., `javac *.java`) but instructors put arbitrary shell commands here. Your executor must support this.
 
 16. **1-second sleep in signals** — The `auto_execute_submission` signal includes a `time.sleep(1)` to avoid race conditions. Always mute signals in test factories.
+
+17. **Runner files are named `.codepost_runner.*`** — The interpreted templates delete their own file as their first statement, guarded by that basename prefix (so running a template locally or from the test suite's temp files leaves it alone). Compiled languages `rm` the runner source in the shell chain right after compiling. Runner files are staged after additional files so they win any name collision.
 
 ---
 

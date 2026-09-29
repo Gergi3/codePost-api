@@ -5,7 +5,7 @@ import logging
 import base64
 import json
 from datetime import datetime
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 from .base import Executor, NotebookExecutor, ExecutionResult
 
@@ -76,32 +76,29 @@ class CPPExecutor(Executor):
         
         code = self.file.data
         
-        # Prepare command
-        code_b64 = base64.b64encode(code.encode('utf-8')).decode('utf-8')
-        
+        # Sources are staged into /work via _put_file before start (never
+        # through argv — Linux caps one argument at 128 KiB).
         if self.test_code:
             # --- Testing Mode ---
             template = self._get_code_template(self.test_code)
             if not template:
                 return ExecutionResult.error("Failed to load C++ test template")
-                
-            template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-            
-            # Write student code to source.cpp
-            # Write harness to runner.cpp
-            # Compile with -Dmain=__student_main to satisfy linker if student provided main
-            
+
+            # Stage student code as source.cpp and the harness as runner.cpp.
+            # Compile with -Dmain=__student_main to satisfy linker if student provided main.
+            # The harness source is removed as soon as it is compiled.
+
             filename = "source.cpp"
-            
+            runner_files = {filename: code, "runner.cpp": template}
+
             cmd_str = (
-                f"echo '{code_b64}' | base64 -d > {filename} && "
-                f"echo '{template_b64}' | base64 -d > runner.cpp && "
                 f"g++ -Dmain=__student_main -c {filename} -o source.o && "
                 f"g++ -c runner.cpp -o runner.o && "
+                f"rm -f runner.cpp && "
                 f"g++ source.o runner.o -o program && "
                 f"./program"
             )
-            
+
         else:
              # --- Standard Execution Mode ---
             ext = self.file.extension or ".cpp"
@@ -110,9 +107,10 @@ class CPPExecutor(Executor):
             filename = f"source{ext}"
             output_bin = "program"
             compiler = "gcc" if ext == ".c" else "g++"
-            
+            runner_files = {filename: code}
+
             # Simple compile and run
-            cmd_str = f"echo '{code_b64}' | base64 -d > {filename} && {compiler} {filename} -o {output_bin} && ./{output_bin}"
+            cmd_str = f"{compiler} {filename} -o {output_bin} && ./{output_bin}"
 
         command = ["sh", "-c", cmd_str]
         
@@ -128,13 +126,15 @@ class CPPExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        for name, content in runner_files.items():
+            self._put_file(container, '/work', name, content)
+
         try:
             container.start()
             result = container.wait(timeout=self.DEFAULT_TIMEOUT)
             stdout = container.logs(stdout=True, stderr=False).decode('utf-8', errors='replace')
             stderr = container.logs(stdout=False, stderr=True).decode('utf-8', errors='replace')
-            
+
             # Parse Test Results
             stdout, stderr, test_results = self.parse_test_results(stdout, stderr)
             
@@ -216,42 +216,43 @@ class CPPNotebookExecutor(NotebookExecutor):
              logger.error(f"Failed to parse notebook: {e} | Code len: {len(code)}")
              return None
 
-    def _get_execution_command(self, template: str) -> List[str]:
+    def _get_runner_files(self, template: str) -> Dict[str, str]:
+        """
+        Files staged into /work before start (never through argv).
+
+        Test mode: `template` is the raw student source -> student.cpp, plus the
+        test harness (template.cpp with the test code injected) -> runner.cpp.
+        Standard mode: the rendered notebook template -> notebook.cpp.
+        """
+        if not self.test_code:
+            return {"notebook.cpp": template}
+
+        files = {"student.cpp": template}
+        harness_path = os.path.join(os.path.dirname(__file__), "../templates", "template.cpp")
+        try:
+            with open(harness_path, 'r') as f:
+                 harness_template = f.read()
+            files["runner.cpp"] = harness_template.replace("#{TEST_CODE}", self.test_code)
+        except Exception as e:
+             # g++ then fails visibly on the missing runner.cpp
+             logger.error(f"Failed to load harness: {e}")
+        return files
+
+    def _get_execution_command(self) -> List[str]:
         if self.test_code:
             # --- Testing Mode ---
-            # template is the raw student source code
-            student_code_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-            
-            # Load Test Harness (template.cpp)
-            harness_path = os.path.join(os.path.dirname(__file__), "../templates", "template.cpp")
-            try:
-                with open(harness_path, 'r') as f:
-                     harness_template = f.read()
-                harness_code = harness_template.replace("#{TEST_CODE}", self.test_code)
-            except Exception as e:
-                 logger.error(f"Failed to load harness: {e}")
-                 return ["false"]
-            
-            harness_b64 = base64.b64encode(harness_code.encode('utf-8')).decode('utf-8')
-
-            # Command:
-            # 1. Write student code to student.cpp
-            # 2. Write harness to runner.cpp
-            # 3. Compile student.cpp with -Dmain=__student_main (rename main)
-            # 4. Compile harness
-            # 5. Link
-            
+            # 1. Compile student.cpp with -Dmain=__student_main (rename main)
+            # 2. Compile harness, then drop its source
+            # 3. Link and run
             cmd_str = (
-                f"echo '{student_code_b64}' | base64 -d > student.cpp && "
-                f"echo '{harness_b64}' | base64 -d > runner.cpp && "
                 f"g++ -Dmain=__student_main -c student.cpp -o student.o && "
                 f"g++ -c runner.cpp -o runner.o && "
+                f"rm -f runner.cpp && "
                 f"g++ student.o runner.o -o program && "
                 f"./program"
             )
             return ["sh", "-c", cmd_str]
-            
+
         else:
             # --- Standard Mode ---
-            template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-            return ["sh", "-c", f"echo '{template_b64}' | base64 -d > notebook.cpp && g++ -o notebook notebook.cpp && ./notebook"]
+            return ["sh", "-c", "g++ -o notebook notebook.cpp && ./notebook"]

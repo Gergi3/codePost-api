@@ -2,6 +2,10 @@
 <?php
 // PHP Execution Template
 
+// The executor stages this script as /work/.codepost_runner.php; unlink it first
+// thing (PHP has already read the whole file). Guarded by name for local/test runs.
+if (str_starts_with(basename(__FILE__), '.codepost_runner')) { @unlink(__FILE__); }
+
 $packages_to_install = []; // REPLACED_BY_EXECUTOR
 
 function template_log($msg, $level) {
