@@ -3060,8 +3060,8 @@ class PromptLabSettings(models.Model):
 # never advertised to it at all.
 COURSE_API_KEY_SCOPE_CHOICES = [
     ('read', 'Read only'),
-    ('write', 'Read and write (no deletes, no student email)'),
-    ('admin', 'Full course admin (deletes, resets, student email)'),
+    ('write', 'Read and write (no deletes, no emailing students)'),
+    ('admin', 'Full course admin (deletes, resets, emailing students)'),
 ]
 
 

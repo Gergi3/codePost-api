@@ -94,9 +94,10 @@ Long-running work (autograder runs, bulk operations) returns a job id the assist
 - **New assignments land hidden.** Anything the assistant creates starts as a hidden draft — students see nothing until you (or the assistant, with write scope, at your instruction) publish it.
 - **Feature gates apply.** Tools for features disabled in your course (for example quizzes) are hidden from the assistant.
 - **Rate limits.** Tool calls are rate-limited per course, so one runaway agent loop can't degrade the platform or other courses.
+- **Student privacy.** The assistant never sees a student's email address, NetID or username. Every student is shown as a stable, course-specific alias such as `student-3f9a1c2d40` — in rosters, submission lists, the gradebook, quiz results, the activity log, and even inside free text like regrade requests. You can hand those aliases back to the assistant ("what did student-3f9a1c2d40 submit?"), and resolve one to a real student under **Course Settings > Student Aliases**. That lookup only works for a signed-in course admin; the assistant's own credential is refused, so it can never de-anonymize its own output. Staff (graders, admins) still appear by email.
 
 > [!WARNING]
-> A connected assistant with a read key can see student names, grades, and submissions. Treat the key like a password: don't paste it into shared configuration, prefer one key per integration, and revoke keys you no longer use under **Course Settings > API Keys**.
+> A connected assistant with a read key can see grades and submission metadata (students appear as aliases, never as emails). Treat the key like a password: don't paste it into shared configuration, prefer one key per integration, and revoke keys you no longer use under **Course Settings > API Keys**.
 
 ## Troubleshooting
 

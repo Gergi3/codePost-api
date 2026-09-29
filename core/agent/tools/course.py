@@ -74,10 +74,11 @@ def get_course_overview(ctx, includeAssignmentCounts: bool = True):
     name='codepost_get_roster',
     title='Course roster',
     description=(
-        'The people in this course by role, and the only way to resolve a '
-        'student name or partial email to a real address — the users API is '
-        'not reachable with a course key.\n\n'
-        "Defaults to counts. Pass view='emails' to get the actual addresses."
+        'The people in this course by role. Students appear as stable aliases '
+        '(student-…), staff as emails. This is the only way to resolve a '
+        'student name or partial email to an alias: search matches the real '
+        'address server-side and returns the alias.\n\n'
+        "Defaults to counts. Pass view='emails' to get the actual entries."
     ),
     input_schema={
         'type': 'object',

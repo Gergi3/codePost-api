@@ -82,7 +82,7 @@ def unknown_student(email: str, candidates: list[str] | None = None) -> ToolErro
     return ToolError(
         'UNKNOWN_STUDENT',
         f"'{email}' is not on this course's roster.",
-        remedy='Use codepost_get_roster with a search term to find the right address.',
+        remedy="Use codepost_get_roster with a search term to find the student's alias.",
         context={'candidates': candidates or []},
     )
 

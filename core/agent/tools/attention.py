@@ -12,7 +12,8 @@ import datetime
 
 from core.agent import errors, shaping
 from core.agent.registry import SCOPE_READ, SCOPE_WRITE, tool
-from core.agent.tools._common import course_header, load_assignments
+from core.agent.tools._common import (course_header, load_assignments,
+                                      resolve_student)
 from core.permissions.capabilities import Capability
 
 
@@ -257,7 +258,8 @@ def manage_regrades(ctx, op: str = 'list', assignmentId=None, submissionId=None,
         'properties': {
             'op': {'enum': ['list', 'set'], 'default': 'list'},
             'student': {'type': 'string',
-                        'description': "The student's email (must be on the roster)."},
+                        'description': "The student's alias (from codepost_get_roster) "
+                                       "or email; must be on the roster."},
             'timeMultiplier': {'type': 'number',
                                'description': 'At least 1. 1.5 = time-and-a-half.'},
             'sebExempt': {'type': 'boolean',
@@ -288,10 +290,11 @@ def set_quiz_accommodation(ctx, op: str = 'list', student: str = '',
     if not student or timeMultiplier is None:
         raise errors.ToolError(
             'PRECONDITION_NOT_MET',
-            "op='set' needs student (email) and timeMultiplier.",
-            remedy='Use codepost_get_roster to find the exact email.',
+            "op='set' needs student (alias) and timeMultiplier.",
+            remedy='Use codepost_get_roster to find the alias.',
             retryable=True)
 
+    student = resolve_student(ctx, student)
     body = {'student': student, 'timeMultiplier': timeMultiplier}
     if sebExempt is not None:
         body['sebExempt'] = sebExempt

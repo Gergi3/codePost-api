@@ -25,6 +25,7 @@ class AgentContext:
     # costs an N-way fan-out, so both are worth holding for the call's life.
     _roster: dict | None = field(default=None, repr=False)
     _assignments: dict[int, dict] | None = field(default=None, repr=False)
+    _aliases: Any = field(default=None, repr=False)   # core.agent.privacy.StudentAliasMap
 
     def require_writable(self) -> None:
         """Pre-flight the archived check every write tool needs.

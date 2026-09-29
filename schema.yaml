@@ -3766,6 +3766,44 @@ paths:
               schema:
                 $ref: '#/components/schemas/CourseRoster'
           description: ''
+  /courses/{id}/agentAliases/:
+    get:
+      operationId: courses_agentAliasesRetrieve
+      description: |-
+        Resolve the pseudonymous alias an MCP agent uses for a student back
+        to the student (or the reverse).
+
+        Course-scoped credentials are refused outright: the agent's own key
+        must never be able to de-anonymize its own output. Only a human
+        course admin, signed in normally, may look aliases up.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this course.
+        required: true
+      - in: query
+        name: q
+        schema:
+          type: string
+        description: An agent alias (student-3f9a1c2d40), a student's email, or a
+          bare NetID/username.
+        required: true
+      tags:
+      - courses
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentAliasLookupResponse'
+          description: ''
   /courses/{id}/aiModels/:
     get:
       operationId: courses_aiModelsRetrieve
@@ -16353,6 +16391,32 @@ components:
           type: boolean
       required:
       - success
+    AgentAliasLookupResponse:
+      type: object
+      properties:
+        matches:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentAliasMatch'
+      required:
+      - matches
+    AgentAliasMatch:
+      type: object
+      properties:
+        alias:
+          type: string
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+        active:
+          type: boolean
+      required:
+      - active
+      - alias
+      - email
+      - username
     AggregationModeEnum:
       enum:
       - all
@@ -18561,8 +18625,8 @@ components:
             How much this key may do. Agent tools are filtered by it: a key never even sees the tools above its scope. 'read' is the safe default.
 
             * `read` - Read only
-            * `write` - Read and write (no deletes, no student email)
-            * `admin` - Full course admin (deletes, resets, student email)
+            * `write` - Read and write (no deletes, no emailing students)
+            * `admin` - Full course admin (deletes, resets, emailing students)
         lastUsedAt:
           type: string
           format: date-time
@@ -18593,8 +18657,8 @@ components:
       type: string
       description: |-
         * `read` - Read only
-        * `write` - Read and write (no deletes, no student email)
-        * `admin` - Full course admin (deletes, resets, student email)
+        * `write` - Read and write (no deletes, no emailing students)
+        * `admin` - Full course admin (deletes, resets, emailing students)
     CourseAuditEvent:
       type: object
       description: Read-only serializer for course audit events.

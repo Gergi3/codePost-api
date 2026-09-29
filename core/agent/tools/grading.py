@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 
-from core.agent import shaping
+from core.agent import privacy, shaping
 from core.agent.registry import SCOPE_READ, tool
 from core.agent.tools._common import (course_header, fetch_assignment,
                                       load_roster, resolve_student)
@@ -41,7 +41,9 @@ _NEVER_RETURNED_ON_REGRADE = ('tests', 'files', 'comments')
                          'regradeRequested'],
                 'default': 'all',
             },
-            'student': {'type': 'string', 'description': 'Filter to one student email.'},
+            'student': {'type': 'string',
+                        'description': 'Filter to one student (alias like '
+                                       'student-3f9a1c2d40, or email).'},
             'grader': {'type': 'string', 'description': 'Filter to one grader email.'},
             'fields': {
                 'type': 'array',
@@ -122,7 +124,11 @@ def list_submissions(ctx, assignmentId: int, status: str = 'all',
     window, meta = shaping.paginate(
         cleaned, limit=shaping.clamp_limit(limit), offset=offset,
         cursor_payload={'assignmentId': assignmentId, 'status': status,
-                        'student': student, 'grader': grader})
+                        # Never an email: the cursor is echoed to the model.
+                        'student': (privacy.alias_for(ctx.course.id, student)
+                                    if student and not privacy.is_alias(student)
+                                    else student),
+                        'grader': grader})
 
     payload = shaping.envelope(
         {'course': course_header(ctx.course),
