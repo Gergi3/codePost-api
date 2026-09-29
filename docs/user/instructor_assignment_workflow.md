@@ -376,9 +376,11 @@ Before grading starts, confirm:
 
 ## Bulk operations
 
-### Bulk finalize / unfinalize
+### Bulk finalize / unfinalize / release
 
-From an assignment's **Bulk Edit** action, you can finalize or unfinalize all submissions at once. When finalizing submissions that have no assigned grader, the system assigns you as the grader automatically.
+From an assignment's **Bulk Edit** action, you can finalize or unfinalize all submissions at once. When finalizing submissions that have no assigned grader, the system assigns you as the grader automatically. Unfinalizing does **not** remove that grader.
+
+**Release claimed submissions back to the queue** unassigns the grader from every claimed, unfinalized submission so graders can **Draw** them again. Finalized submissions are left untouched. Use this if submissions ended up assigned to the wrong person, for example after a bulk finalize followed by a bulk unfinalize.
 
 ### Download grades
 

@@ -275,20 +275,23 @@ def _move_warning(ctx, students):
     name='codepost_update_submission_grading',
     title='Assign graders / finalize',
     description=(
-        'Assign a grader to submissions, finalize or unfinalize them, or '
-        "distribute an assignment's unclaimed submissions evenly among "
-        'graders.\n\n'
+        'Assign a grader to submissions, finalize or unfinalize them, release '
+        "them back to the Draw queue, or distribute an assignment's unclaimed "
+        'submissions evenly among graders.\n\n'
         "op='assign': set grader (and optionally isFinalized) on the listed "
-        "submissionIds. op='distribute': split every unclaimed submission of "
-        'an assignment across the given grader emails. Finalizing requires the '
-        'submission to have a grader and a grade.'
+        "submissionIds. op='unassign': clear the grader on the listed "
+        'submissionIds so graders can Draw them again; finalized submissions '
+        "are refused (unfinalize them first). op='distribute': split every "
+        'unclaimed submission of an assignment across the given grader emails. '
+        'Finalizing requires the submission to have a grader and a grade.'
     ),
     input_schema={
         'type': 'object',
         'properties': {
-            'op': {'enum': ['assign', 'distribute'], 'default': 'assign'},
+            'op': {'enum': ['assign', 'unassign', 'distribute'],
+                   'default': 'assign'},
             'submissionIds': {'type': 'array', 'items': {'type': 'integer'},
-                              'description': "For op='assign'."},
+                              'description': "For op='assign' / 'unassign'."},
             'grader': {'type': 'string', 'description': 'Grader email (assign).'},
             'isFinalized': {'type': 'boolean'},
             'assignmentId': {'type': 'integer',
@@ -352,29 +355,38 @@ def update_submission_grading(ctx, op: str = 'assign', submissionIds=None,
             warnings=(['Some assignments failed; re-call op="assign" for '
                        'those ids.'] if failures else None))
 
-    # op == 'assign'
+    # op in ('assign', 'unassign')
     if not submissionIds:
         raise errors.ToolError(
-            'PRECONDITION_NOT_MET', "op='assign' needs submissionIds.",
+            'PRECONDITION_NOT_MET', f"op='{op}' needs submissionIds.",
             remedy='Get ids from codepost_list_submissions.', retryable=True)
-    body = {}
-    if grader:
-        body['grader'] = grader
-    if isFinalized is not None:
-        body['isFinalized'] = isFinalized
-    if not body:
-        raise errors.ToolError(
-            'PRECONDITION_NOT_MET', 'Pass grader and/or isFinalized.',
-            remedy='Nothing to change otherwise.', retryable=True)
+    warnings = []
+    if op == 'unassign':
+        # The API refuses a finalized submission without a grader, so finalized
+        # ids surface as failures rather than silently losing their grader.
+        body = {'grader': None}
+        warnings.append('Finalized submissions keep their grader and are '
+                        'reported as failures; unfinalize them first.')
+    else:
+        body = {}
+        if grader:
+            body['grader'] = grader
+        if isFinalized is not None:
+            body['isFinalized'] = isFinalized
+        if not body:
+            raise errors.ToolError(
+                'PRECONDITION_NOT_MET', 'Pass grader and/or isFinalized.',
+                remedy='Nothing to change otherwise.', retryable=True)
+        if isFinalized is False:
+            warnings.append('Unfinalizing under per-student feedback revokes '
+                            "a student's already-visible feedback.")
 
     if dryRun:
         return shaping.envelope(
             {'course': course_header(ctx.course),
              'plan': {'submissions': submissionIds, 'changes': body}},
             meta={'dryRun': True, 'hint': 'Re-call with dryRun=false to apply.'},
-            warnings=(['Unfinalizing under per-student feedback revokes a '
-                       "student's already-visible feedback."]
-                      if isFinalized is False else None))
+            warnings=warnings or None)
 
     applied, failures = [], []
     for sid in submissionIds:

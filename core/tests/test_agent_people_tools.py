@@ -196,6 +196,43 @@ class TestGradingOps:
         warnings = result["structuredContent"].get("warnings") or []
         assert any("per-student" in w for w in warnings)
 
+    def test_unassign_releases_claimed_submissions(self, api_client, write_key,
+                                                   course, assignment_with_unclaimed):
+        from core.models import Submission
+        grader = course.graders.first()
+        Submission.objects.filter(assignment=assignment_with_unclaimed).update(grader=grader)
+        ids = list(Submission.objects.filter(
+            assignment=assignment_with_unclaimed).values_list("id", flat=True))
+
+        result = call(api_client, write_key, "codepost_update_submission_grading",
+                      {"op": "unassign", "submissionIds": ids, "dryRun": False})
+        assert result["isError"] is False, result["content"][0]["text"]
+        data = result["structuredContent"]["data"]
+        assert sorted(data["applied"]) == sorted(ids)
+        assert data["failures"] == []
+        assert not Submission.objects.filter(
+            assignment=assignment_with_unclaimed, grader__isnull=False).exists()
+
+    def test_unassign_refuses_finalized_submissions(self, api_client, write_key,
+                                                    course, assignment_with_unclaimed):
+        from core.models import Submission
+        grader = course.graders.first()
+        finalized, claimed = Submission.objects.filter(
+            assignment=assignment_with_unclaimed)[:2]
+        Submission.objects.filter(id=finalized.id).update(
+            grader=grader, isFinalized=True, grade=10)
+        Submission.objects.filter(id=claimed.id).update(grader=grader)
+
+        result = call(api_client, write_key, "codepost_update_submission_grading",
+                      {"op": "unassign", "submissionIds": [finalized.id, claimed.id],
+                       "dryRun": False})
+        assert result["isError"] is False, result["content"][0]["text"]
+        data = result["structuredContent"]["data"]
+        assert data["applied"] == [claimed.id]
+        assert [f["submissionId"] for f in data["failures"]] == [finalized.id]
+        finalized.refresh_from_db()
+        assert finalized.grader == grader
+
 
 class TestEditRubric:
 
