@@ -226,7 +226,7 @@ Return patterns are shown directly inside each language script example above.
 
 ## Troubleshooting checklist
 
-#### If preview shows no tests or fewer tests than expected:
+### If preview shows no tests or fewer tests than expected:
 
 1. Confirm assignment **Environment Language** is correct.
 2. Check syntax against this guide's exact pattern.
@@ -234,13 +234,13 @@ Return patterns are shown directly inside each language script example above.
 4. Ensure your script is saved in the category.
 5. Re-open Split Preview after edits.
 
-#### If totals look wrong:
+### If totals look wrong:
 
 1. Search for tests missing `points`.
 2. Look for syntax errors that stop pattern matching.
 3. Check if renamed/removed tests were intentionally changed.
 
-#### If tests are failing unexpectedly:
+### If tests are failing unexpectedly:
 
 1. Is the students code causing exceptions that the test doesn't handle?
 2. Look for syntax issues in the test script that could cause parsing errors.
