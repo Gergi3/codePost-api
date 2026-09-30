@@ -239,6 +239,9 @@ def _file_content_for_prompt(name: str, data: str) -> str:
     if lower.endswith('.ipynb'):
         from core.services.ai_service import _format_notebook_as_cells
         return _format_notebook_as_cells(data)
+    if data.startswith('data:'):
+        # Other binary files (images, ...) — never emit raw base64 into a prompt.
+        return f"(binary file '{name}' not shown)"
     return data
 
 

@@ -1165,6 +1165,14 @@ class Executor(abc.ABC):
                     self.log(f"Adding to tar: {tar_name} (from {filename})")
                     
                     content_bytes = content.encode('utf-8')
+                    # Data URI content ("data:<mime>;base64,...") is binary — decode so the
+                    # container gets the real file (e.g. an image), not the URI text.
+                    if content.startswith('data:'):
+                        try:
+                            _header, encoded = content.split(',', 1)
+                            content_bytes = base64.b64decode(encoded)
+                        except Exception:
+                            pass
                     tarinfo = tarfile.TarInfo(name=tar_name)
                     tarinfo.size = len(content_bytes)
                     tarinfo.mode = 0o644
