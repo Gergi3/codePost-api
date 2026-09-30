@@ -145,17 +145,18 @@ class TestFileContentConversion:
         assert "could not extract text from PDF 'broken.pdf'" in text
         assert 'not actually a pdf' not in text or 'could not extract' in text
 
-    def test_assignment_image_becomes_placeholder_not_base64(self, db):
+    def test_assignment_binary_becomes_placeholder_not_base64(self, db):
+        # A non-image binary (no vision input possible) — see test_prompt_images.py for images.
         import base64
         from core.tests.factories import CourseFactory, AssignmentFileFactory
-        png = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'\x00' * 16).decode()
+        jar = 'data:application/java-archive;base64,' + base64.b64encode(b'PK\x03\x04' + b'\x00' * 16).decode()
         with factory.django.mute_signals(post_save):
             course = CourseFactory(name="img101", period="s2026", organization__name="Rutgers")
             assignment = course.assignments.first()
-            AssignmentFileFactory(assignment=assignment, name='plot.png', data=png, extension='.png')
+            AssignmentFileFactory(assignment=assignment, name='lib.jar', data=jar, extension='.jar')
         ctx = VariableContext(course=course, assignment=assignment)
-        text, _ = substitute_variables('{assignment_file:plot.png}', ctx)
-        assert "binary file 'plot.png' not shown" in text
+        text, _ = substitute_variables('{assignment_file:lib.jar}', ctx)
+        assert "binary file 'lib.jar' not shown" in text
         assert 'base64' not in text
 
     def test_course_pdf_resolves_to_text(self, db):

@@ -187,6 +187,16 @@ submits, generate questions from *their* code to confirm they understand what th
   the assignment uses [per-student dataset variants](/docs/instructor-environment-testing),
   `{student_dataset}` inserts the specific data assigned to that student, so questions can reference
   their actual numbers.
+- **Images.** `{assignment_files}` includes text files only — images are skipped, with a note in the
+  resolved prompt. Use `{assignment_files_with_images}` to also attach images (PNG, JPEG, GIF, WebP)
+  for the model to look at, or name one directly with `{assignment_file:plot.png}` or
+  `{course_file:diagram.png}`. Each image adds to the prompt's token cost, and at most 10 are attached
+  per prompt. With a self-hosted Ollama model, only a vision model (e.g. `llava`, `gemma3`) can see
+  them.
+- **Unchanged files aren't sent twice.** If the same content appears more than once in a prompt — for
+  example a starter file or spec PDF in `{assignment_files}` that the student submitted untouched in
+  `{submission_files}` — it is included once, and later occurrences are replaced with a short
+  "identical to … above" note. This keeps the model's context window for what actually differs.
 - **Generation is manual by default** (Settings → AI-generated questions → **Generate question
   sets manually**): you create sets from the Review tab — **Generate missing** (the count of
   affected students is shown first, since generation costs AI tokens) or per student. You can also
