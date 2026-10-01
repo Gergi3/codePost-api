@@ -1,4 +1,6 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+import json
+
 from django.contrib import admin
 from django.db.models import Count, Q, F
 from django.utils.html import format_html
@@ -10,32 +12,62 @@ from django.utils import timezone
 from typing import Any, Optional
 
 from core.models import (
+    AIUsageRecord,
     Assignment,
-    AssignmentFile,
     AssignmentDataSet,
+    AssignmentFile,
+    AutograderExecutionEvent,
     CachedExecutionResult,
     Comment,
-    CommentTemplate,
     CommentTag,
+    CommentTemplate,
     Course,
+    CourseAPIKey,
+    CourseAuditEvent,
     CourseFile,
     CourseFileContent,
     Environment,
     File,
     FileTemplate,
-    # HelperFile, # Removed as per instruction
+    GeneratedQuestionSet,
+    GeneratedQuizQuestion,
+    LearningObjective,
     MaintenanceBanner,
     OneTimeToken,
     Organization,
+    PendingAgentAction,
     Profile,
+    PromptExperiment,
+    PromptFeedback,
+    PromptLabSettings,
+    Question,
+    QuestionBank,
+    QuestionChoice,
+    Quiz,
+    QuizAccommodation,
+    QuizAttempt,
+    QuizGeneratedSection,
+    QuizImage,
+    QuizImportJob,
+    QuizQuestion,
+    QuizQuestionGroup,
+    QuizResponse,
+    QuizSebLaunch,
+    QuizSuggestionJob,
     RubricCategory,
     RubricComment,
     Section,
-    # SolutionFile, # Removed as per instruction
+    StudentDataSetAssignment,
     Submission,
     SubmissionFile,
+    SubmissionFileEdit,
     SubmissionHistory,
+    SubmissionSummary,
     SubmissionTest,
+    SubmissionVariantRun,
+    SuggestedComment,
+    SuggestedQuizQuestion,
+    SystemPromptVariant,
     TestCase,
     TestCategory,
     TestCategoryResource,
@@ -2196,3 +2228,696 @@ class MaintenanceBannerAdmin(admin.ModelAdmin):
 
 
 
+
+
+# ============================================================================
+# Quizzes
+# ============================================================================
+
+
+def _preview(text: Optional[str], length: int = 80) -> str:
+    text = (text or "").strip().replace("\n", " ")
+    return text[:length] + "…" if len(text) > length else text
+
+
+def _pretty_json(value: Any) -> str:
+    """Render a JSON blob as a scrollable <pre> block for readonly admin fields."""
+    if not value:
+        return format_html('<em style="color:#999;">(empty)</em>')
+    return format_html(
+        '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; '
+        'font-size:12px; background:#f6f8fa; padding:8px; border-radius:4px;">{}</pre>',
+        json.dumps(value, indent=2, ensure_ascii=False, default=str))
+
+
+def _error_cell(text: Optional[str]) -> str:
+    if not text:
+        return "\u2014"
+    return format_html('<span style="color:#c62828;" title="{}">{}</span>', text, _preview(text, 90))
+
+
+class HasGenerationErrorFilter(admin.SimpleListFilter):
+    title = "generation error"
+    parameter_name = "has_error"
+
+    def lookups(self, request: Any, model_admin: Any) -> list[tuple[str, str]]:
+        return [("yes", "Has error"), ("no", "No error")]
+
+    def queryset(self, request: Any, queryset: Any) -> Any:
+        value = self.value()
+        if value == "yes":
+            return queryset.exclude(errorMessage="")
+        if value == "no":
+            return queryset.filter(errorMessage="")
+        return queryset
+
+
+class QuestionChoiceInline(admin.TabularInline):
+    model = QuestionChoice
+    extra = 0
+    fields = ("sortKey", "text", "isCorrect", "feedback")
+    ordering = ("sortKey",)
+
+
+@admin.register(QuestionBank)
+class QuestionBankAdmin(admin.ModelAdmin):
+    list_display = ("name", "course", "source", "question_count", "createdBy", "created")
+    list_filter = ("source", "created")
+    search_fields = ("name", "course__name", "course__period")
+    autocomplete_fields = ["course"]
+    raw_id_fields = ("createdBy",)
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+    def question_count(self, obj: QuestionBank) -> int:
+        return obj.question_count
+    question_count.short_description = "Questions"
+    question_count.admin_order_field = "question_count"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "createdBy").annotate(
+            question_count=Count("questions", distinct=True))
+
+
+@admin.register(Question)
+class QuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "text_preview", "questionType", "course", "bank", "points", "source", "created")
+    list_filter = ("questionType", "source", "created")
+    search_fields = ("text", "course__name", "course__period", "bank__name")
+    autocomplete_fields = ["course", "bank"]
+    raw_id_fields = ("createdBy",)
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+    inlines = [QuestionChoiceInline]
+
+    def text_preview(self, obj: Question) -> str:
+        return _preview(obj.text)
+    text_preview.short_description = "Text"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "bank")
+
+
+@admin.register(QuestionChoice)
+class QuestionChoiceAdmin(admin.ModelAdmin):
+    list_display = ("id", "question", "sortKey", "text_preview", "isCorrect")
+    list_filter = ("isCorrect",)
+    search_fields = ("text", "question__text")
+    raw_id_fields = ("question",)
+    readonly_fields = ("created", "modified")
+
+    def text_preview(self, obj: QuestionChoice) -> str:
+        return _preview(obj.text)
+    text_preview.short_description = "Text"
+
+
+class QuizQuestionInline(admin.TabularInline):
+    model = QuizQuestion
+    extra = 0
+    fields = ("sortKey", "question", "pointsOverride")
+    raw_id_fields = ("question",)
+    ordering = ("sortKey",)
+
+
+class QuizQuestionGroupInline(admin.TabularInline):
+    model = QuizQuestionGroup
+    extra = 0
+    fields = ("sortKey", "name", "bank", "pickCount", "pointsPerQuestion")
+    raw_id_fields = ("bank",)
+    ordering = ("sortKey",)
+
+
+class QuizGeneratedSectionInline(admin.TabularInline):
+    model = QuizGeneratedSection
+    extra = 0
+    fields = ("sortKey", "name", "numQuestions", "pointsPerQuestion", "questionTypes")
+    ordering = ("sortKey",)
+
+
+@admin.register(Quiz)
+class QuizAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "title", "course", "assignment", "assignment_state", "published_status",
+        "assignmentTrigger", "timeLimitMinutes", "attemptsAllowed",
+        "in_progress_count", "submitted_count", "created",
+    )
+    list_filter = ("isPublished", "assignmentTrigger", "requireSebBrowser", "closeEvent", "created")
+    search_fields = ("title", "course__name", "course__period", "assignment__name")
+    autocomplete_fields = ["course", "assignment"]
+    raw_id_fields = ("createdBy",)
+    readonly_fields = ("created", "modified", "scheduledGenerationRanAt")
+    date_hierarchy = "created"
+    inlines = [QuizQuestionInline, QuizQuestionGroupInline, QuizGeneratedSectionInline]
+    search_help_text = "Search by quiz title, course name/period, or assignment name."
+
+    fieldsets = (
+        ("Basic Information", {
+            "fields": ("title", "description", "course", "assignment", "source", "createdBy", "isPublished")
+        }),
+        ("Availability", {
+            "fields": ("assignmentTrigger", "availableFrom", "availableUntil", "closeEvent",
+                       "closeOffsetMinutes", "endAttemptsAtClose", "accessCode")
+        }),
+        ("Attempt Rules", {
+            "fields": ("timeLimitMinutes", "attemptsAllowed", "shuffleQuestions", "oneQuestionAtATime",
+                       "allowBacktracking", "requireSebBrowser", "sebConfigKey")
+        }),
+        ("Results & Scoring", {
+            "fields": ("showCorrectAnswers", "sealResultsUntilClose", "showResponses",
+                       "allowSubmissionReview", "passingScore", "passingScoreUnit",
+                       "scoringPolicy", "multiAttemptScoreMethod")
+        }),
+        ("Generated Questions", {
+            "fields": ("gradersCanReviewGenerated", "gradersCanGenerate", "autoPublishGenerated",
+                       "manualGeneration", "generationDate", "scheduledGenerationRanAt"),
+            "classes": ("collapse",)
+        }),
+        ("Metadata", {
+            "fields": ("metadata", "created", "modified"),
+            "classes": ("collapse",)
+        }),
+    )
+
+    def assignment_state(self, obj: Quiz) -> str:
+        return obj.assignment.state if obj.assignment_id else "—"
+    assignment_state.short_description = "Assignment state"
+    assignment_state.admin_order_field = "assignment__state"
+
+    def published_status(self, obj: Quiz) -> str:
+        if obj.isPublished:
+            return format_html('<span style="color:#2e7d32; font-weight:600;">&#9679; Published</span>')
+        return format_html('<span style="color:#9e9e9e;">&#9675; Unpublished</span>')
+    published_status.short_description = "Published"
+    published_status.admin_order_field = "isPublished"
+
+    def in_progress_count(self, obj: Quiz) -> int:
+        return obj.in_progress_count
+    in_progress_count.short_description = "In progress"
+    in_progress_count.admin_order_field = "in_progress_count"
+
+    def submitted_count(self, obj: Quiz) -> int:
+        return obj.submitted_count
+    submitted_count.short_description = "Submitted"
+    submitted_count.admin_order_field = "submitted_count"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "assignment").annotate(
+            in_progress_count=Count("attempts", filter=Q(attempts__status="in_progress"), distinct=True),
+            submitted_count=Count("attempts", filter=Q(attempts__status="submitted"), distinct=True),
+        )
+
+
+@admin.register(QuizQuestion)
+class QuizQuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "quiz", "sortKey", "question", "pointsOverride")
+    search_fields = ("quiz__title", "question__text")
+    autocomplete_fields = ["quiz"]
+    raw_id_fields = ("question",)
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(QuizQuestionGroup)
+class QuizQuestionGroupAdmin(admin.ModelAdmin):
+    list_display = ("id", "quiz", "sortKey", "name", "bank", "pickCount", "pointsPerQuestion")
+    search_fields = ("quiz__title", "name", "bank__name")
+    autocomplete_fields = ["quiz", "bank"]
+    readonly_fields = ("created", "modified")
+
+
+class QuizResponseInline(admin.TabularInline):
+    model = QuizResponse
+    extra = 0
+    can_delete = False
+    show_change_link = True
+    fields = ("sortKey", "question_text", "answer_preview", "points", "pointsEarned",
+              "isCorrect", "needsManualGrading", "gradedBy", "gradedAt")
+    readonly_fields = ("sortKey", "question_text", "answer_preview", "points", "gradedBy", "gradedAt")
+    ordering = ("sortKey", "id")
+
+    def has_add_permission(self, request: Any, obj: Any = None) -> bool:
+        return False
+
+    def question_text(self, obj: QuizResponse) -> str:
+        return _preview((obj.questionSnapshot or {}).get("text"), 60)
+    question_text.short_description = "Question"
+
+    def answer_preview(self, obj: QuizResponse) -> str:
+        if obj.selectedChoiceKeys:
+            return f"choices {obj.selectedChoiceKeys}"
+        return _preview(obj.answerText, 60)
+    answer_preview.short_description = "Answer"
+
+
+@admin.register(QuizAttempt)
+class QuizAttemptAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "quiz", "student_email", "attemptNumber", "status_badge", "startedAt", "deadline",
+        "submittedAt", "score_display", "answered_count", "needsManualGrading", "passed",
+    )
+    list_filter = ("status", "needsManualGrading", "passed", "isOfficialOverride",
+                   "closeBypassed", "lockdownVerified", "startedAt")
+    search_fields = ("student__email", "student__username", "quiz__title",
+                     "quiz__course__name", "quiz__course__period")
+    autocomplete_fields = ["quiz"]
+    raw_id_fields = ("student",)
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "startedAt"
+    inlines = [QuizResponseInline]
+    search_help_text = "Search by student email/username, quiz title, or course name/period."
+
+    def student_email(self, obj: QuizAttempt) -> str:
+        return obj.student.email
+    student_email.short_description = "Student"
+    student_email.admin_order_field = "student__email"
+
+    def status_badge(self, obj: QuizAttempt) -> str:
+        if obj.status == "submitted":
+            return format_html('<span style="color:#2e7d32; font-weight:600;">Submitted</span>')
+        return format_html('<span style="color:#e65100; font-weight:600;">In progress</span>')
+    status_badge.short_description = "Status"
+    status_badge.admin_order_field = "status"
+
+    def score_display(self, obj: QuizAttempt) -> str:
+        if obj.score is None and obj.maxScore is None:
+            return "—"
+        return f"{obj.score if obj.score is not None else '?'} / {obj.maxScore if obj.maxScore is not None else '?'}"
+    score_display.short_description = "Score"
+    score_display.admin_order_field = "score"
+
+    def answered_count(self, obj: QuizAttempt) -> str:
+        return f"{obj.answered_count} / {obj.response_count}"
+    answered_count.short_description = "Answered"
+    answered_count.admin_order_field = "answered_count"
+
+    def get_queryset(self, request: Any) -> Any:
+        answered = ~Q(responses__answerText="") | ~Q(responses__selectedChoiceKeys=[])
+        return super().get_queryset(request).select_related("quiz", "quiz__course", "student").annotate(
+            response_count=Count("responses", distinct=True),
+            answered_count=Count("responses", filter=answered, distinct=True),
+        )
+
+
+@admin.register(QuizResponse)
+class QuizResponseAdmin(admin.ModelAdmin):
+    list_display = ("id", "attempt", "sortKey", "question_text", "answer_preview", "points",
+                    "pointsEarned", "isCorrect", "needsManualGrading", "gradedBy", "gradedAt")
+    list_filter = ("isCorrect", "needsManualGrading", "modified")
+    search_fields = ("attempt__student__email", "attempt__quiz__title", "answerText")
+    raw_id_fields = ("attempt", "question", "generatedQuestion", "gradedBy")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "modified"
+
+    def question_text(self, obj: QuizResponse) -> str:
+        return _preview((obj.questionSnapshot or {}).get("text"), 60)
+    question_text.short_description = "Question"
+
+    def answer_preview(self, obj: QuizResponse) -> str:
+        if obj.selectedChoiceKeys:
+            return f"choices {obj.selectedChoiceKeys}"
+        return _preview(obj.answerText, 60)
+    answer_preview.short_description = "Answer"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related(
+            "attempt", "attempt__quiz", "attempt__student", "gradedBy")
+
+
+@admin.register(QuizAccommodation)
+class QuizAccommodationAdmin(admin.ModelAdmin):
+    list_display = ("id", "course", "student", "timeMultiplier", "sebExempt", "modified")
+    list_filter = ("sebExempt",)
+    search_fields = ("student__email", "course__name", "course__period")
+    autocomplete_fields = ["course"]
+    raw_id_fields = ("student",)
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(QuizSebLaunch)
+class QuizSebLaunchAdmin(admin.ModelAdmin):
+    list_display = ("id", "quiz", "student", "configKey", "expiresAt", "created")
+    list_filter = ("created",)
+    search_fields = ("student__email", "quiz__title")
+    autocomplete_fields = ["quiz"]
+    raw_id_fields = ("student", "token")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+
+@admin.register(QuizGeneratedSection)
+class QuizGeneratedSectionAdmin(admin.ModelAdmin):
+    list_display = ("id", "quiz", "sortKey", "name", "numQuestions", "pointsPerQuestion")
+    search_fields = ("quiz__title", "name")
+    autocomplete_fields = ["quiz"]
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(GeneratedQuestionSet)
+class GeneratedQuestionSetAdmin(admin.ModelAdmin):
+    """Per-student AI-generated question sets. A failed run leaves ``errorMessage`` set and, when
+    the model answered but the output could not be parsed, the raw model output in
+    ``generationMetadata['raw_output']`` — both are rendered read-only on the change page."""
+
+    list_display = ("id", "quiz", "student", "submission", "status", "error", "question_count",
+                    "approvedBy", "approvedAt", "modified")
+    list_filter = ("status", HasGenerationErrorFilter, "created")
+    search_fields = ("quiz__title", "student__email", "generationBatch", "errorMessage")
+    autocomplete_fields = ["quiz"]
+    raw_id_fields = ("student", "submission", "approvedBy", "promptVariant")
+    readonly_fields = ("errorMessage", "raw_model_output", "section_prompts", "generation_metadata",
+                       "generationBatch", "created", "modified")
+    exclude = ("generationMetadata",)
+    date_hierarchy = "created"
+
+    def error(self, obj: GeneratedQuestionSet) -> str:
+        return _error_cell(obj.errorMessage)
+    error.short_description = "Error"
+    error.admin_order_field = "errorMessage"
+
+    def question_count(self, obj: GeneratedQuestionSet) -> int:
+        return obj.question_count
+    question_count.short_description = "Questions"
+    question_count.admin_order_field = "question_count"
+
+    def raw_model_output(self, obj: GeneratedQuestionSet) -> str:
+        raw = (obj.generationMetadata or {}).get("raw_output")
+        if not raw:
+            return format_html('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
+                               'or the output parsed cleanly)</em>')
+        return format_html(
+            '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; font-size:12px; '
+            'background:#fff8f6; padding:8px; border-radius:4px;">{}</pre>', raw)
+    raw_model_output.short_description = "Raw model output"
+
+    def section_prompts(self, obj: GeneratedQuestionSet) -> str:
+        return _pretty_json((obj.generationMetadata or {}).get("sections"))
+    section_prompts.short_description = "Section prompts sent"
+
+    def generation_metadata(self, obj: GeneratedQuestionSet) -> str:
+        meta = dict(obj.generationMetadata or {})
+        meta.pop("raw_output", None)
+        meta.pop("sections", None)
+        return _pretty_json(meta)
+    generation_metadata.short_description = "Provider / token usage"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("quiz", "student", "approvedBy").annotate(
+            question_count=Count("questions", distinct=True))
+
+
+@admin.register(GeneratedQuizQuestion)
+class GeneratedQuizQuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "set", "section", "sortKey", "questionType", "text_preview", "points")
+    list_filter = ("questionType",)
+    search_fields = ("text", "set__quiz__title", "set__student__email")
+    raw_id_fields = ("set", "section")
+    readonly_fields = ("created", "modified")
+
+    def text_preview(self, obj: GeneratedQuizQuestion) -> str:
+        return _preview(obj.text)
+    text_preview.short_description = "Text"
+
+
+@admin.register(SuggestedQuizQuestion)
+class SuggestedQuizQuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "assignment", "questionType", "status", "text_preview", "points", "acceptedBy", "created")
+    list_filter = ("status", "questionType", "created")
+    search_fields = ("text", "assignment__name", "generationBatch")
+    autocomplete_fields = ["assignment"]
+    raw_id_fields = ("sourceQuestion", "acceptedBy", "acceptedQuestion", "promptVariant")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+    def text_preview(self, obj: SuggestedQuizQuestion) -> str:
+        return _preview(obj.text)
+    text_preview.short_description = "Text"
+
+
+@admin.register(QuizImportJob)
+class QuizImportJobAdmin(admin.ModelAdmin):
+    list_display = ("id", "course", "status", "createdBy", "targetBank", "createdQuizCount",
+                    "createdQuestionCount", "created")
+    list_filter = ("status", "created")
+    search_fields = ("course__name", "createdBy__email", "taskId")
+    autocomplete_fields = ["course"]
+    raw_id_fields = ("createdBy", "targetBank")
+    readonly_fields = ("taskId", "created", "modified")
+    date_hierarchy = "created"
+
+
+@admin.register(QuizSuggestionJob)
+class QuizSuggestionJobAdmin(admin.ModelAdmin):
+    list_display = ("id", "course", "assignment", "quiz", "status", "error", "requestedBy",
+                    "createdCount", "created")
+    list_filter = ("status", HasGenerationErrorFilter, "created")
+    search_fields = ("course__name", "assignment__name", "quiz__title", "requestedBy__email",
+                     "taskId", "errorMessage")
+    autocomplete_fields = ["course", "assignment", "quiz"]
+    raw_id_fields = ("sourceQuestion", "requestedBy")
+    readonly_fields = ("errorMessage", "result_data", "taskId", "generationBatch", "created", "modified")
+    exclude = ("resultData",)
+    date_hierarchy = "created"
+
+    def error(self, obj: QuizSuggestionJob) -> str:
+        return _error_cell(obj.errorMessage)
+    error.short_description = "Error"
+    error.admin_order_field = "errorMessage"
+
+    def result_data(self, obj: QuizSuggestionJob) -> str:
+        return _pretty_json(obj.resultData)
+    result_data.short_description = "Result data"
+
+
+@admin.register(QuizImage)
+class QuizImageAdmin(admin.ModelAdmin):
+    list_display = ("token", "course", "originalName", "contentType", "uploadedBy", "created")
+    list_filter = ("contentType", "created")
+    search_fields = ("originalName", "token", "course__name")
+    autocomplete_fields = ["course"]
+    raw_id_fields = ("uploadedBy",)
+    readonly_fields = ("token", "created", "modified")
+    date_hierarchy = "created"
+
+
+# ============================================================================
+# Audit, Agent & AI
+# ============================================================================
+
+
+@admin.register(CourseAuditEvent)
+class CourseAuditEventAdmin(admin.ModelAdmin):
+    """Read-only: audit events are written by the services layer, never edited by hand."""
+
+    list_display = ("created", "event_type", "course", "user_email", "assignment", "quiz",
+                    "submission", "meta_preview")
+    list_filter = ("event_type", "created")
+    search_fields = ("course__name", "course__period", "user__email", "assignment__name", "quiz__title")
+    raw_id_fields = ("course", "assignment", "quiz", "submission", "user")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+    search_help_text = "Search by course name/period, user email, assignment name, or quiz title."
+
+    def has_add_permission(self, request: Any) -> bool:
+        return False
+
+    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+        return False
+
+    def user_email(self, obj: CourseAuditEvent) -> str:
+        return obj.user.email if obj.user_id else "—"
+    user_email.short_description = "User"
+    user_email.admin_order_field = "user__email"
+
+    def meta_preview(self, obj: CourseAuditEvent) -> str:
+        return format_html('<span style="font-family:monospace;">{}</span>', _preview(str(obj.meta or ""), 100))
+    meta_preview.short_description = "Meta"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "assignment", "quiz", "submission", "user")
+
+
+@admin.register(CourseAPIKey)
+class CourseAPIKeyAdmin(admin.ModelAdmin):
+    """Keys are minted through the API (the raw key is shown once); the admin only inspects/revokes."""
+
+    list_display = ("name", "course", "key_prefix", "scope", "is_active", "created_by", "last_used_at", "created")
+    list_filter = ("scope", "is_active", "created")
+    search_fields = ("name", "key_prefix", "course__name", "course__period", "created_by__email")
+    raw_id_fields = ("course", "created_by")
+    readonly_fields = ("key_prefix", "hashed_key", "last_used_at", "created", "modified")
+    date_hierarchy = "created"
+
+    def has_add_permission(self, request: Any) -> bool:
+        return False
+
+
+@admin.register(PendingAgentAction)
+class PendingAgentActionAdmin(admin.ModelAdmin):
+    list_display = ("id", "tool", "course", "requested_by", "state", "expires_at", "created")
+    list_filter = ("tool", "created")
+    search_fields = ("tool", "course__name", "requested_by__email", "code")
+    raw_id_fields = ("course", "requested_by", "approved_by")
+    readonly_fields = ("args_hash", "plan_hash", "code", "approved_at", "denied_at", "redeemed_at",
+                       "created", "modified")
+    date_hierarchy = "created"
+
+    def has_add_permission(self, request: Any) -> bool:
+        return False
+
+    def state(self, obj: PendingAgentAction) -> str:
+        if obj.redeemed_at:
+            return "redeemed"
+        if obj.denied_at:
+            return "denied"
+        if obj.approved_at:
+            return "approved"
+        if obj.expires_at and obj.expires_at < timezone.now():
+            return "expired"
+        return "pending"
+    state.short_description = "State"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "requested_by")
+
+
+@admin.register(AutograderExecutionEvent)
+class AutograderExecutionEventAdmin(admin.ModelAdmin):
+    list_display = ("created", "course", "assignment", "success", "cached", "language", "trigger",
+                    "error_category", "error_message")
+    list_filter = ("success", "cached", "trigger", "error_category", "language", "created")
+    search_fields = ("course__name", "assignment__name", "error_message")
+    raw_id_fields = ("course", "assignment")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+    def has_add_permission(self, request: Any) -> bool:
+        return False
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("course", "assignment")
+
+
+@admin.register(AIUsageRecord)
+class AIUsageRecordAdmin(admin.ModelAdmin):
+    list_display = ("created", "request_type", "provider", "model", "user", "course", "assignment",
+                    "total_tokens", "cached_tokens", "estimated_cost", "status", "error")
+    list_filter = ("status", "request_type", "provider", "model", "created")
+    search_fields = ("user__email", "course__name", "assignment__name", "model", "error_message")
+    raw_id_fields = ("organization", "course", "assignment", "user", "prompt_variant", "experiment")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+    def error(self, obj: AIUsageRecord) -> str:
+        return _error_cell(obj.error_message)
+    error.short_description = "Error"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("user", "course", "assignment")
+
+
+@admin.register(SuggestedComment)
+class SuggestedCommentAdmin(admin.ModelAdmin):
+    list_display = ("id", "submission", "file", "status", "startLine", "endLine", "pointDelta",
+                    "text_preview", "acceptedBy", "created")
+    list_filter = ("status", "created")
+    search_fields = ("text", "submission__id", "file__name", "generationBatch")
+    raw_id_fields = ("submission", "file", "rubricComment", "acceptedBy", "acceptedComment", "promptVariant")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+    def text_preview(self, obj: SuggestedComment) -> str:
+        return _preview(obj.text)
+    text_preview.short_description = "Text"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("submission", "file", "acceptedBy")
+
+
+@admin.register(SubmissionSummary)
+class SubmissionSummaryAdmin(admin.ModelAdmin):
+    list_display = ("id", "submission", "regenerationCount", "text_preview", "modified")
+    search_fields = ("submission__id", "text")
+    raw_id_fields = ("submission",)
+    readonly_fields = ("created", "modified")
+
+    def text_preview(self, obj: SubmissionSummary) -> str:
+        return _preview(obj.text, 120)
+    text_preview.short_description = "Summary"
+
+
+@admin.register(SystemPromptVariant)
+class SystemPromptVariantAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "prompt_type", "status", "version", "parent", "created_by", "created")
+    list_filter = ("prompt_type", "status", "created")
+    search_fields = ("name", "text")
+    raw_id_fields = ("parent", "created_by")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+
+@admin.register(PromptExperiment)
+class PromptExperimentAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "prompt_type", "status", "variant_a", "variant_b", "sample_rate",
+                    "started_by", "completed_at", "created")
+    list_filter = ("prompt_type", "status", "created")
+    search_fields = ("name",)
+    raw_id_fields = ("variant_a", "variant_b", "started_by")
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(PromptFeedback)
+class PromptFeedbackAdmin(admin.ModelAdmin):
+    list_display = ("created", "prompt_type", "experiment", "variant_used", "chosen_variant", "user",
+                    "rating", "is_custom_context")
+    list_filter = ("prompt_type", "rating", "is_custom_context", "created")
+    search_fields = ("user__email", "feedback_text", "experiment__name")
+    raw_id_fields = ("experiment", "variant_used", "chosen_variant", "user", "usage_record")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+
+@admin.register(PromptLabSettings)
+class PromptLabSettingsAdmin(admin.ModelAdmin):
+    list_display = ("id", "auto_improve_enabled", "schedule_enabled", "schedule_interval_hours",
+                    "threshold_enabled", "feedback_threshold", "min_feedback", "ai_provider", "ai_model")
+    # The provider key is encrypted at rest; never render it in the admin form.
+    exclude = ("ai_api_key",)
+
+
+# ============================================================================
+# Remaining submission / assignment helpers
+# ============================================================================
+
+
+@admin.register(LearningObjective)
+class LearningObjectiveAdmin(admin.ModelAdmin):
+    list_display = ("shortId", "name", "assignment", "visibilityMode", "aggregationMode", "created")
+    list_filter = ("visibilityMode", "aggregationMode")
+    search_fields = ("shortId", "name", "assignment__name")
+    autocomplete_fields = ["assignment"]
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(StudentDataSetAssignment)
+class StudentDataSetAssignmentAdmin(admin.ModelAdmin):
+    list_display = ("id", "assignment", "student", "dataset", "assignedBy", "created")
+    search_fields = ("assignment__name", "student__email", "dataset__name")
+    autocomplete_fields = ["assignment", "dataset"]
+    raw_id_fields = ("student", "assignedBy")
+    readonly_fields = ("created", "modified")
+
+
+@admin.register(SubmissionVariantRun)
+class SubmissionVariantRunAdmin(admin.ModelAdmin):
+    list_display = ("id", "submission", "dataset", "created")
+    search_fields = ("submission__id", "dataset__name")
+    raw_id_fields = ("submission", "dataset")
+    readonly_fields = ("created", "modified")
+    date_hierarchy = "created"
+
+
+@admin.register(SubmissionFileEdit)
+class SubmissionFileEditAdmin(admin.ModelAdmin):
+    list_display = ("id", "file", "lastEditedBy", "modified")
+    search_fields = ("file__name", "file__submission__id", "lastEditedBy__email")
+    raw_id_fields = ("file", "lastEditedBy")
+    readonly_fields = ("created", "modified")
