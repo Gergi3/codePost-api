@@ -374,7 +374,8 @@ class TestParseJsonQuestions:
         f'Here are the questions:\n\n```json\n{QUESTIONS_JSON}\n```\n\nLet me know if you need more.',
         f'Here are the questions: {QUESTIONS_JSON} Let me know.',
         json.dumps({'questions': json.loads(QUESTIONS_JSON)}),
-    ], ids=['bare', 'fenced', 'prose+fenced', 'prose+inline', 'object-wrapper'])
+        f'{QUESTIONS_JSON}\n{QUESTIONS_JSON}',
+    ], ids=['bare', 'fenced', 'prose+fenced', 'prose+inline', 'object-wrapper', 'repeated'])
     def test_tolerated_shapes(self, text):
         from core.services.ai_json import parse_json_questions
         assert parse_json_questions(text) == json.loads(QUESTIONS_JSON)

@@ -14,7 +14,8 @@ import re
 def json_candidates(text: str):
     """Yield the substrings of a model output that may hold its JSON payload, most
     literal first: the whole text, the body of a wrapping ```json fence, any fenced
-    block, and finally the outermost bracketed span (prose around the JSON)."""
+    block, the outermost bracketed span (prose around the JSON), and finally the first
+    complete JSON value (the payload repeated or followed by another one)."""
     cleaned = (text or '').strip()
     yield cleaned
     if cleaned.startswith('```'):
@@ -29,6 +30,14 @@ def json_candidates(text: str):
     end = max(cleaned.rfind(']'), cleaned.rfind('}'))
     if starts and end > min(starts):
         yield cleaned[min(starts):end + 1]
+    if starts:
+        # The payload followed by more JSON (a model that printed the array twice):
+        # the outermost span above fails, so take the first complete value.
+        try:
+            _, stop = json.JSONDecoder(strict=False).raw_decode(cleaned, min(starts))
+        except json.JSONDecodeError:
+            return
+        yield cleaned[min(starts):stop]
 
 
 def escape_stray_quotes(text: str) -> str:
