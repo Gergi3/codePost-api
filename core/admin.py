@@ -1,4 +1,6 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+import json
+
 from django.contrib import admin
 from django.db.models import Count, Q, F
 from django.utils.html import format_html
@@ -2238,6 +2240,38 @@ def _preview(text: Optional[str], length: int = 80) -> str:
     return text[:length] + "…" if len(text) > length else text
 
 
+def _pretty_json(value: Any) -> str:
+    """Render a JSON blob as a scrollable <pre> block for readonly admin fields."""
+    if not value:
+        return format_html('<em style="color:#999;">(empty)</em>')
+    return format_html(
+        '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; '
+        'font-size:12px; background:#f6f8fa; padding:8px; border-radius:4px;">{}</pre>',
+        json.dumps(value, indent=2, ensure_ascii=False, default=str))
+
+
+def _error_cell(text: Optional[str]) -> str:
+    if not text:
+        return "\u2014"
+    return format_html('<span style="color:#c62828;" title="{}">{}</span>', text, _preview(text, 90))
+
+
+class HasGenerationErrorFilter(admin.SimpleListFilter):
+    title = "generation error"
+    parameter_name = "has_error"
+
+    def lookups(self, request: Any, model_admin: Any) -> list[tuple[str, str]]:
+        return [("yes", "Has error"), ("no", "No error")]
+
+    def queryset(self, request: Any, queryset: Any) -> Any:
+        value = self.value()
+        if value == "yes":
+            return queryset.exclude(errorMessage="")
+        if value == "no":
+            return queryset.filter(errorMessage="")
+        return queryset
+
+
 class QuestionChoiceInline(admin.TabularInline):
     model = QuestionChoice
     extra = 0
@@ -2539,13 +2573,55 @@ class QuizGeneratedSectionAdmin(admin.ModelAdmin):
 
 @admin.register(GeneratedQuestionSet)
 class GeneratedQuestionSetAdmin(admin.ModelAdmin):
-    list_display = ("id", "quiz", "student", "submission", "status", "approvedBy", "approvedAt", "created")
-    list_filter = ("status", "created")
-    search_fields = ("quiz__title", "student__email", "generationBatch")
+    """Per-student AI-generated question sets. A failed run leaves ``errorMessage`` set and, when
+    the model answered but the output could not be parsed, the raw model output in
+    ``generationMetadata['raw_output']`` — both are rendered read-only on the change page."""
+
+    list_display = ("id", "quiz", "student", "submission", "status", "error", "question_count",
+                    "approvedBy", "approvedAt", "modified")
+    list_filter = ("status", HasGenerationErrorFilter, "created")
+    search_fields = ("quiz__title", "student__email", "generationBatch", "errorMessage")
     autocomplete_fields = ["quiz"]
     raw_id_fields = ("student", "submission", "approvedBy", "promptVariant")
-    readonly_fields = ("created", "modified")
+    readonly_fields = ("errorMessage", "raw_model_output", "section_prompts", "generation_metadata",
+                       "generationBatch", "created", "modified")
+    exclude = ("generationMetadata",)
     date_hierarchy = "created"
+
+    def error(self, obj: GeneratedQuestionSet) -> str:
+        return _error_cell(obj.errorMessage)
+    error.short_description = "Error"
+    error.admin_order_field = "errorMessage"
+
+    def question_count(self, obj: GeneratedQuestionSet) -> int:
+        return obj.question_count
+    question_count.short_description = "Questions"
+    question_count.admin_order_field = "question_count"
+
+    def raw_model_output(self, obj: GeneratedQuestionSet) -> str:
+        raw = (obj.generationMetadata or {}).get("raw_output")
+        if not raw:
+            return format_html('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
+                               'or the output parsed cleanly)</em>')
+        return format_html(
+            '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; font-size:12px; '
+            'background:#fff8f6; padding:8px; border-radius:4px;">{}</pre>', raw)
+    raw_model_output.short_description = "Raw model output"
+
+    def section_prompts(self, obj: GeneratedQuestionSet) -> str:
+        return _pretty_json((obj.generationMetadata or {}).get("sections"))
+    section_prompts.short_description = "Section prompts sent"
+
+    def generation_metadata(self, obj: GeneratedQuestionSet) -> str:
+        meta = dict(obj.generationMetadata or {})
+        meta.pop("raw_output", None)
+        meta.pop("sections", None)
+        return _pretty_json(meta)
+    generation_metadata.short_description = "Provider / token usage"
+
+    def get_queryset(self, request: Any) -> Any:
+        return super().get_queryset(request).select_related("quiz", "student", "approvedBy").annotate(
+            question_count=Count("questions", distinct=True))
 
 
 @admin.register(GeneratedQuizQuestion)
@@ -2590,13 +2666,25 @@ class QuizImportJobAdmin(admin.ModelAdmin):
 
 @admin.register(QuizSuggestionJob)
 class QuizSuggestionJobAdmin(admin.ModelAdmin):
-    list_display = ("id", "course", "assignment", "quiz", "status", "requestedBy", "createdCount", "created")
-    list_filter = ("status", "created")
-    search_fields = ("course__name", "assignment__name", "quiz__title", "requestedBy__email", "taskId")
+    list_display = ("id", "course", "assignment", "quiz", "status", "error", "requestedBy",
+                    "createdCount", "created")
+    list_filter = ("status", HasGenerationErrorFilter, "created")
+    search_fields = ("course__name", "assignment__name", "quiz__title", "requestedBy__email",
+                     "taskId", "errorMessage")
     autocomplete_fields = ["course", "assignment", "quiz"]
     raw_id_fields = ("sourceQuestion", "requestedBy")
-    readonly_fields = ("taskId", "generationBatch", "created", "modified")
+    readonly_fields = ("errorMessage", "result_data", "taskId", "generationBatch", "created", "modified")
+    exclude = ("resultData",)
     date_hierarchy = "created"
+
+    def error(self, obj: QuizSuggestionJob) -> str:
+        return _error_cell(obj.errorMessage)
+    error.short_description = "Error"
+    error.admin_order_field = "errorMessage"
+
+    def result_data(self, obj: QuizSuggestionJob) -> str:
+        return _pretty_json(obj.resultData)
+    result_data.short_description = "Result data"
 
 
 @admin.register(QuizImage)
@@ -2711,12 +2799,16 @@ class AutograderExecutionEventAdmin(admin.ModelAdmin):
 @admin.register(AIUsageRecord)
 class AIUsageRecordAdmin(admin.ModelAdmin):
     list_display = ("created", "request_type", "provider", "model", "user", "course", "assignment",
-                    "total_tokens", "cached_tokens", "estimated_cost", "status")
-    list_filter = ("request_type", "provider", "model", "status", "created")
-    search_fields = ("user__email", "course__name", "assignment__name", "model")
+                    "total_tokens", "cached_tokens", "estimated_cost", "status", "error")
+    list_filter = ("status", "request_type", "provider", "model", "created")
+    search_fields = ("user__email", "course__name", "assignment__name", "model", "error_message")
     raw_id_fields = ("organization", "course", "assignment", "user", "prompt_variant", "experiment")
     readonly_fields = ("created", "modified")
     date_hierarchy = "created"
+
+    def error(self, obj: AIUsageRecord) -> str:
+        return _error_cell(obj.error_message)
+    error.short_description = "Error"
 
     def get_queryset(self, request: Any) -> Any:
         return super().get_queryset(request).select_related("user", "course", "assignment")
