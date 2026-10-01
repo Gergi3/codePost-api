@@ -392,6 +392,17 @@ class TestParseJsonQuestions:
         assert 'baby_names["Year"] == 2000' in q['description']
         assert q['reference_solution'] == 'pa = baby_names[(baby_names["State"] == "PA")]'
 
+    def test_invalid_backslash_escapes_inside_strings(self):
+        """Real failure seen in production: a regex (``\\s*``) left unescaped inside a
+        string; the repair keeps it and leaves legal escapes (``\\\\w``, ``\\n``) alone."""
+        from core.services.ai_json import parse_json_questions
+        text = ('[{"type": "code", "text": "Fix the regex.",\n'
+                '  "description": "```python\\npattern = re.compile(r\'([a-zA-Z]+)\\s*[:=]\\s*([^\\s|]+)\')\\n```",\n'
+                '  "reference_solution": "# [a-zA-Z0-9] or \\\\w\\npattern = re.compile(r\'\\s*\')"}]')
+        [q] = parse_json_questions(text)
+        assert q['description'] == "```python\npattern = re.compile(r'([a-zA-Z]+)\\s*[:=]\\s*([^\\s|]+)')\n```"
+        assert q['reference_solution'] == "# [a-zA-Z0-9] or \\w\npattern = re.compile(r'\\s*')"
+
     def test_literal_newline_inside_string(self):
         from core.services.ai_json import parse_json_questions
         assert parse_json_questions('[{"type": "essay", "text": "Line one\nline two"}]') == [

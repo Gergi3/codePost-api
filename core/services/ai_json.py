@@ -2,8 +2,8 @@
 """Lenient parsing of JSON that a language model was asked to produce.
 
 Models break the "reply with a bare JSON array" contract in a handful of recurring
-ways — ```json fences, prose around the payload, an object wrapper, literal newlines
-or unescaped quotes inside strings (code in a description). The generation tasks
+ways — ```json fences, prose around the payload, an object wrapper, literal newlines,
+unescaped quotes or invalid backslash escapes inside strings (code in a description). The generation tasks
 parse through here so a run isn't failed over formatting; anything that still
 doesn't parse raises ``ValueError`` and the task records the raw output.
 """
@@ -92,9 +92,22 @@ def escape_stray_quotes(text: str) -> str:
     return ''.join(out)
 
 
+def escape_invalid_backslashes(text: str) -> str:
+    """Double a backslash that doesn't start a legal JSON escape — a regex such as
+    ``\\s*`` pasted into a string unescaped. Legal escapes (``\\\\``, ``\\n``, ``\\"``, ...)
+    are consumed as pairs so their second character is never re-examined."""
+    return re.sub(r'\\(.)', lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else '\\\\' + m.group(1),
+                  text, flags=re.DOTALL)
+
+
 def loads_lenient(candidate: str):
     """``json.loads`` that tolerates literal control characters inside strings and,
-    failing that, unescaped double quotes inside strings."""
+    failing that, invalid backslash escapes and unescaped double quotes inside strings."""
+    try:
+        return json.loads(candidate, strict=False)
+    except json.JSONDecodeError:
+        pass
+    candidate = escape_invalid_backslashes(candidate)
     try:
         return json.loads(candidate, strict=False)
     except json.JSONDecodeError:
