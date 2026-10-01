@@ -200,7 +200,7 @@ def test_personalized_quiz_generation_forwards_images():
             quiz=quiz, systemPrompt='Ask about {assignment_file:plot.png}', numQuestions=1)
     captured = {}
 
-    async def fake_dispatch(self, system_prompt, user_prompt, images=()):
+    async def fake_dispatch(self, system_prompt, user_prompt, images=(), response_schema=None):
         captured['images'] = images
         captured['system_prompt'] = system_prompt
         return ('[]', 1, 1, 2, 0)

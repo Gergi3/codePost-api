@@ -28,7 +28,7 @@ def _run(coro):
 def test_generate_test_script_java_strips_wrapper_class_and_imports():
     service = _build_service()
 
-    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=()):
+    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=(), response_schema=None):
         return ("""```java
 import java.util.regex.Pattern;
 
@@ -74,7 +74,7 @@ public double testOnly() {
 }
 """
 
-    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=()):
+    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=(), response_schema=None):
         return (raw, 50, 100, 150, 0)
 
     service._call_openai = MethodType(_fake_openai, service)
@@ -96,7 +96,7 @@ public double testOnly() {
 def test_generate_test_script_non_java_only_strips_markdown_fences():
     service = _build_service()
 
-    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=()):
+    async def _fake_openai(self, system_prompt: str, user_prompt: str, images=(), response_schema=None):
         return ("""```python
 @test(\"x\", points=1)
 def test_x():

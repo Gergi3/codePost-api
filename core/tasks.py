@@ -516,6 +516,13 @@ def _update_suggestion_job(job_id: int | None, **fields):
     QuizSuggestionJob.objects.filter(pk=job_id).update(modified=timezone.now(), **fields)
 
 
+# Model calls per quiz-generation request (suggestions, and per personalized section)
+# before it fails: model output is nondeterministic, so one re-ask — with the problem
+# quoted back — recovers most malformed or unusable outputs without anyone regenerating
+# by hand.
+_GENERATION_ATTEMPTS = 2
+
+
 @shared_task
 def generate_quiz_question_suggestions(
     requested_by_id: int,
@@ -575,36 +582,49 @@ def generate_quiz_question_suggestions(
     service.set_request_context(
         user=user, request_type='quiz_generation', instructions=instructions,
     )
-    try:
-        result = async_to_sync(service.generate_quiz_questions)(
-            assignment=assignment,
-            num_questions=num_questions,
-            question_types=question_types,
-            source_question=source_question,
-            instructions=instructions,
-        )
-    except Exception as e:
-        logger.error(f"[QuizGen] Generation failed for course {course.id}: {e}", exc_info=True)
-        _update_suggestion_job(job_id, status='failed',
-                               errorMessage=f'The AI request failed: {str(e)[:500]}')
-        return
+    # Unparseable output is re-asked once with the parse error quoted back (the model
+    # fixes its own formatting when told what broke); each attempt's usage is recorded.
+    questions = None
+    prior_error = ''
+    for attempt in range(1, _GENERATION_ATTEMPTS + 1):
+        try:
+            result = async_to_sync(service.generate_quiz_questions)(
+                assignment=assignment,
+                num_questions=num_questions,
+                question_types=question_types,
+                source_question=source_question,
+                instructions=instructions,
+                prior_error=prior_error,
+            )
+        except Exception as e:
+            logger.error(f"[QuizGen] Generation failed for course {course.id}: {e}", exc_info=True)
+            _update_suggestion_job(job_id, status='failed',
+                                   errorMessage=f'The AI request failed: {str(e)[:500]}')
+            return
 
-    if not result.success or not result.text:
-        logger.warning(f"[QuizGen] Empty/failed generation for course {course.id}: {result.error}")
+        if not result.success or not result.text:
+            logger.warning(f"[QuizGen] Empty/failed generation for course {course.id}: {result.error}")
+            service.record_usage(result, user=user, request_type='quiz_generation')
+            _update_suggestion_job(job_id, status='failed',
+                                   errorMessage=(result.error or 'The AI provider returned no output.')[:500])
+            return
+
+        try:
+            questions = parse_json_questions(result.text)
+            break
+        except Exception as e:
+            prior_error = f'it was not valid JSON ({str(e)[:300]}).'
+            logger.warning(f"[QuizGen] Attempt {attempt}/{_GENERATION_ATTEMPTS}: could not parse model "
+                           f"output as JSON: {e}. Raw output (truncated): {result.text[:1500]}")
+            if attempt < _GENERATION_ATTEMPTS:
+                service.record_usage(result, user=user, request_type='quiz_generation')
+    if questions is None:
         service.record_usage(result, user=user, request_type='quiz_generation')
         _update_suggestion_job(job_id, status='failed',
-                               errorMessage=(result.error or 'The AI provider returned no output.')[:500])
-        return
-
-    try:
-        questions = parse_json_questions(result.text)
-    except Exception as e:
-        logger.error(f"[QuizGen] Could not parse model output as JSON: {e}", exc_info=True)
-        service.record_usage(result, user=user, request_type='quiz_generation')
-        _update_suggestion_job(job_id, status='failed',
-                               errorMessage='The model returned output that could not be parsed as questions. '
-                                            'Try again — repeated failures usually mean the configured model is '
-                                            'unsuitable for structured output.')
+                               errorMessage='The model returned output that could not be parsed as questions '
+                                            f'(after {_GENERATION_ATTEMPTS} attempts). Try again — repeated '
+                                            'failures usually mean the configured model is unsuitable for '
+                                            'structured output.')
         return
 
     batch = uuid.uuid4()
@@ -832,9 +852,6 @@ def _claim_generation_sets(quiz, students, submission, force, batch):
     return claimed_ids
 
 
-# Attempts per section before the set fails: model output is nondeterministic, so one
-# re-ask recovers most malformed or unusable outputs without anyone regenerating by hand.
-_GENERATION_ATTEMPTS = 2
 # How much of a rejected model output is kept on the set (generationMetadata.raw_output)
 # so a developer can see what the model actually returned.
 _RAW_OUTPUT_KEEP = 20_000
@@ -847,7 +864,7 @@ def _usable_question_rows(text, section, env_language, quiz):
         parsed = parse_json_questions(text)
     except Exception as e:
         logger.warning(f"[PersonalQuizGen] Could not parse model output as JSON (quiz {quiz.id}): {e}")
-        return [], 'Could not parse the model output as questions.'
+        return [], f'Could not parse the model output as questions (not valid JSON: {str(e)[:300]}).'
     rows = []
     for q in parsed:
         fields = _normalize_generated_question(q, env_language)
@@ -884,10 +901,12 @@ def _generate_quiz_question_rows(service, quiz, submission, env_language, user):
     section_prompts = []  # what the model actually saw, for staff review on the set
     for section in quiz.generatedSections.all():
         section_rows: list[tuple] = []
+        prior_error = ''
         for attempt in range(1, _GENERATION_ATTEMPTS + 1):
             raw_output = None
             try:
-                result = async_to_sync(service.generate_personalized_quiz_questions)(section, submission)
+                result = async_to_sync(service.generate_personalized_quiz_questions)(
+                    section, submission, prior_error=prior_error)
             except Exception as e:
                 logger.error(f"[PersonalQuizGen] Generation failed for quiz {quiz.id}: {e}", exc_info=True)
                 error = f"Generation failed: {e}"
@@ -910,8 +929,9 @@ def _generate_quiz_question_rows(service, quiz, submission, env_language, user):
             if not error:
                 break
             # An output problem (not a provider failure): keep what the model returned
-            # and re-ask — the next sample usually follows the format.
+            # and re-ask with the problem quoted back.
             raw_output = result.text[:_RAW_OUTPUT_KEEP]
+            prior_error = error
             logger.warning(
                 f"[PersonalQuizGen] Quiz {quiz.id} section {section.id}, attempt "
                 f"{attempt}/{_GENERATION_ATTEMPTS}: {error} Raw output (truncated): "

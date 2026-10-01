@@ -136,3 +136,49 @@ def parse_json_questions(text: str) -> list:
         data = data['questions'] if isinstance(data.get('questions'), list) else (
             lists[0] if len(lists) == 1 else [])
     return data if isinstance(data, list) else []
+
+
+def quiz_questions_schema() -> dict:
+    """JSON Schema for a quiz-generation reply: ``{"questions": [...]}``.
+
+    Handed to the provider's structured-output option so malformed JSON never reaches
+    the parser (which unwraps the ``questions`` key). The root is an object because
+    OpenAI's strict mode refuses an array root. Optional fields are nullable rather
+    than omittable: strict mode requires every property to be listed in ``required``,
+    and every provider accepts a nullable type."""
+    from core.models import QUESTION_TYPE_CHOICES
+
+    def nullable(t):
+        return {'type': [t, 'null']}
+
+    choice = {
+        'type': 'object',
+        'properties': {
+            'text': {'type': 'string'},
+            'is_correct': {'type': 'boolean'},
+            'feedback': nullable('string'),
+        },
+        'required': ['text', 'is_correct', 'feedback'],
+        'additionalProperties': False,
+    }
+    question = {
+        'type': 'object',
+        'properties': {
+            'type': {'type': 'string', 'enum': [key for key, _ in QUESTION_TYPE_CHOICES]},
+            'text': {'type': 'string'},
+            'description': nullable('string'),
+            'points': {'type': 'integer'},
+            'choices': {'type': 'array', 'items': choice},
+            'starter_code': nullable('string'),
+            'reference_solution': nullable('string'),
+        },
+        'required': ['type', 'text', 'description', 'points', 'choices',
+                     'starter_code', 'reference_solution'],
+        'additionalProperties': False,
+    }
+    return {
+        'type': 'object',
+        'properties': {'questions': {'type': 'array', 'items': question}},
+        'required': ['questions'],
+        'additionalProperties': False,
+    }
