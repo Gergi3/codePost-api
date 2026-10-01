@@ -26,7 +26,7 @@ import hashlib
 import logging
 import re
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
 from dataclasses import dataclass
 from core.constants import DEFAULT_OLLAMA_URL, DEFAULT_PORTKEY_URL
 from core.models import Course, Assignment, Submission, SubmissionFile, User
@@ -37,6 +37,7 @@ import random
 if TYPE_CHECKING:
     import pymupdf
     from core.models import PromptExperiment
+    from core.prompts.variables import ImageAttachment
 
 
 # -----------------------------------------------------------------------
@@ -604,20 +605,24 @@ class AIService:
             logger.warning(f"Failed to format prompt template: {e}")
             return "\n\n".join([template, self.GLOBAL_SYSTEM_PROMPT])
 
-    async def _dispatch_provider(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
-        """Route to the configured provider. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+    async def _dispatch_provider(self, system_prompt: str, user_prompt: str,
+                                 images: 'Sequence[ImageAttachment]' = ()) -> tuple[str, int, int, int, int]:
+        """Route to the configured provider. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
+
+        ``images`` ride on the user turn as vision input (system messages can't carry them)."""
         if self.provider == 'gemini':
-            return await self._call_gemini(system_prompt, user_prompt)
+            return await self._call_gemini(system_prompt, user_prompt, images)
         elif self.provider == 'openai':
-            return await self._call_openai(system_prompt, user_prompt)
+            return await self._call_openai(system_prompt, user_prompt, images)
         elif self.provider == 'ollama':
-            return await self._call_ollama(system_prompt, user_prompt)
+            return await self._call_ollama(system_prompt, user_prompt, images)
         elif self.provider in ('portkey', 'custom'):
-            return await self._call_portkey(system_prompt, user_prompt)
+            return await self._call_portkey(system_prompt, user_prompt, images)
         else:
             raise ValueError(f"Unknown AI provider: {self.provider}")
 
-    async def _generate(self, system_prompt: str, user_prompt: str, label: str = 'generation') -> GenerationResult:
+    async def _generate(self, system_prompt: str, user_prompt: str, label: str = 'generation',
+                        images: 'Sequence[ImageAttachment]' = ()) -> GenerationResult:
         """Dispatch to the configured provider and wrap the result.
 
         Handles provider routing, token bookkeeping, and error translation
@@ -625,7 +630,8 @@ class AIService:
         ``GenerationResult``.
         """
         try:
-            text, input_tokens, output_tokens, total_tokens, cached_tokens = await self._dispatch_provider(system_prompt, user_prompt)
+            text, input_tokens, output_tokens, total_tokens, cached_tokens = await self._dispatch_provider(
+                system_prompt, user_prompt, images)
             return GenerationResult(
                 text=text,
                 success=True,
@@ -1407,8 +1413,21 @@ end"""
             logger.info(f"Gemini explicit cache creation skipped ({type(e).__name__}): {e}")
             return None
 
-    async def _call_gemini(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    @staticmethod
+    def _openai_user_content(user_prompt: str, images: 'Sequence[ImageAttachment]'):
+        """OpenAI chat 'content': a plain string, or text + image_url parts (data URIs are
+        accepted as-is) when images are attached. Shared by OpenAI and Portkey/custom."""
+        if not images:
+            return user_prompt
+        return [{"type": "text", "text": user_prompt}] + [
+            {"type": "image_url", "image_url": {"url": f"data:{img.mime};base64,{img.base64_data}"}}
+            for img in images
+        ]
+
+    async def _call_gemini(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = ()) -> tuple[str, int, int, int, int]:
         """Call Google Gemini API. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+        import base64
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=self.api_key)
@@ -1425,9 +1444,15 @@ end"""
                 system_instruction=system_prompt,
             )
 
+        contents: Any = user_prompt
+        if images:
+            contents = [types.Part.from_text(text=user_prompt)] + [
+                types.Part.from_bytes(data=base64.b64decode(img.base64_data), mime_type=img.mime)
+                for img in images
+            ]
         response = await client.aio.models.generate_content(
             model=self.model,
-            contents=user_prompt,
+            contents=contents,
             config=config,
         )
         input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
@@ -1437,7 +1462,8 @@ end"""
         self._last_provider_meta = {'model': getattr(response, 'model_version', None)}
         return response.text or "", input_tokens, output_tokens, total_tokens, cached_tokens
     
-    async def _call_openai(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    async def _call_openai(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = ()) -> tuple[str, int, int, int, int]:
         """Call OpenAI API. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
         from openai import AsyncOpenAI
         
@@ -1446,7 +1472,7 @@ end"""
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, images)},
             ],
         )
         usage = response.usage
@@ -1460,20 +1486,27 @@ end"""
         self._last_provider_meta = {'model': getattr(response, 'model', None)}
         return response.choices[0].message.content or "", input_tokens, output_tokens, total_tokens, cached_tokens
     
-    async def _call_ollama(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
-        """Call Ollama API (self-hosted). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+    async def _call_ollama(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = ()) -> tuple[str, int, int, int, int]:
+        """Call Ollama API (self-hosted). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
+
+        Images go in the bare-base64 ``images`` list; only a vision model (llava, gemma3,
+        qwen-vl, ...) will actually look at them — a text-only model silently ignores them."""
         import httpx
         
         base_url = self.base_url or DEFAULT_OLLAMA_URL
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "system": system_prompt,
+            "prompt": user_prompt,
+            "stream": False,
+        }
+        if images:
+            payload["images"] = [img.base64_data for img in images]
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "system": system_prompt,
-                    "prompt": user_prompt,
-                    "stream": False,
-                },
+                json=payload,
                 timeout=60.0,
             )
             response.raise_for_status()
@@ -1483,7 +1516,8 @@ end"""
             self._last_provider_meta = {'model': data.get('model')}
             return data["response"], input_tokens, output_tokens, input_tokens + output_tokens, 0
     
-    async def _call_portkey(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    async def _call_portkey(self, system_prompt: str, user_prompt: str,
+                            images: 'Sequence[ImageAttachment]' = ()) -> tuple[str, int, int, int, int]:
         """Call Portkey AI gateway (self-hosted or cloud). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
         
         Portkey is an AI Gateway that proxies requests to underlying providers.
@@ -1526,7 +1560,7 @@ end"""
                     "model": self.model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "user", "content": self._openai_user_content(user_prompt, images)},
                     ],
                 },
                 timeout=60.0,
@@ -1623,6 +1657,9 @@ end"""
                 'name': sf.name,
                 'extension': sf.extension,
                 'content': content,
+                # Raw stored data (pre-extraction) so prompt variables can dedup a file
+                # that also appears as an unchanged assignment file.
+                'data': sf.data,
                 'is_notebook': is_notebook,
                 'is_student_file': _is_student_file(sf),
             })
@@ -2201,7 +2238,7 @@ Provide a concise markdown summary following the guidelines in your instructions
         Returns a ``GenerationResult`` whose ``text`` is a JSON array of question objects.
         """
         from asgiref.sync import sync_to_async
-        from core.prompts.variables import VariableContext, substitute_variables
+        from core.prompts.variables import VariableContext, resolve_template
 
         def _collect_context():
             # Submission is None on the eager path (submission-free prompts, including
@@ -2211,15 +2248,15 @@ Provide a concise markdown summary following the guidelines in your instructions
             ctx = VariableContext(course=self.course, assignment=assignment,
                                   submission=submission, section=section,
                                   demo_files=demo_files)
-            instructor_text, _ = substitute_variables(section.systemPrompt, ctx)
+            resolved = resolve_template(section.systemPrompt, ctx)
             try:
                 language = (assignment.environment.language or '') if assignment else ''
             except Exception:
                 language = ''
             name = assignment.name if assignment is not None else section.quiz.title
-            return instructor_text, name, language
+            return resolved.text, resolved.images, name, language
 
-        instructor_text, assignment_name, language = await sync_to_async(_collect_context)()
+        instructor_text, images, assignment_name, language = await sync_to_async(_collect_context)()
 
         question_types = section.questionTypes or [
             'multiple_choice', 'true_false', 'short_answer', 'essay', 'code']
@@ -2249,7 +2286,10 @@ Provide a concise markdown summary following the guidelines in your instructions
             "grader-only answer key (correct answer/working code, plus worked steps for "
             "hand-computation questions). It is never shown to the student."
         )
-        result = await self._generate(system_prompt, user_prompt, label='personalized quiz generation')
+        # Images referenced by the instructor's variables ride on the user turn; the
+        # "(image attached: …)" markers in instructor_text tell the model what they are.
+        result = await self._generate(system_prompt, user_prompt, label='personalized quiz generation',
+                                      images=images)
         # Recorded (success or not) so staff can inspect exactly what the model was given.
         result.resolved_prompt = instructor_text
         if result.success:
@@ -2453,7 +2493,11 @@ def build_context_from_file(
             
         # Include assignment files
         for assign_file in assignment.files.all():
-            other_files.append(f"**[Assignment File] {assign_file.name}:**\n```\n{assign_file.data}\n```")
+            # Binary files (images, ...) are stored as data URIs — never inline base64.
+            af_data = assign_file.data
+            if af_data.startswith('data:'):
+                af_data = f"(binary file '{assign_file.name}' not shown)"
+            other_files.append(f"**[Assignment File] {assign_file.name}:**\n```\n{af_data}\n```")
             
         context.all_files_content = '\n\n'.join(other_files)
     

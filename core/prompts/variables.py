@@ -7,9 +7,12 @@ tokens like ``{assignment_name}``, ``{assignment_file:main.py}`` or ``{submissio
 that are resolved server-side at generation time. This module is the single source of
 truth for those variables:
 
-* ``substitute_variables()`` — resolve tokens in a template (generation time; graceful:
+* ``resolve_template()`` — resolve tokens in a template (generation time; graceful:
   an unresolvable token becomes a visible ``(unavailable: …)`` marker, an unknown token
-  passes through untouched so literal braces are safe).
+  passes through untouched so literal braces are safe). Image files referenced by a
+  variable become ``ImageAttachment``s for the model's vision input, with a short
+  ``(image attached: …)`` marker left in the text. ``substitute_variables()`` is the
+  text-only view of the same result.
 * ``validate_template()`` — strict checking at save time (unknown variable, missing or
   bad argument, variable that needs an attached assignment) so instructors get a 400
   with a helpful message instead of silent degradation.
@@ -25,9 +28,10 @@ is imported during ``core.models`` load via the prompt registry).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
@@ -46,6 +50,53 @@ COURSE_FILE_CHAR_CAP = 15000         # course-level reference files (mirrors ass
 # The assigned dataset variant IS the core content of a retasking prompt, so it gets a
 # larger cap than a generic assignment file — a 15k cap silently clipped most real CSVs.
 STUDENT_DATASET_CHAR_CAP = 40000
+# Image types every supported provider accepts as vision input (SVG is not one of them).
+PROMPT_IMAGE_MIMES = frozenset({'image/png', 'image/jpeg', 'image/gif', 'image/webp'})
+# Hard cap on attached images per prompt — each one costs hundreds to >1k input tokens.
+MAX_PROMPT_IMAGES = 10
+
+
+@dataclass(frozen=True)
+class ImageAttachment:
+    """An image a variable pulled out of a stored ``File.data`` data URI, for the
+    provider's vision input (``AIService._generate(images=...)``)."""
+    name: str
+    mime: str
+    base64_data: str
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """A resolver result that carries images alongside its text."""
+    text: str
+    images: tuple[ImageAttachment, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolvedTemplate:
+    text: str
+    used: set[str]
+    images: tuple[ImageAttachment, ...]
+
+
+class _ContentDedup:
+    """Per-resolution memory of file contents already emitted, so a file that appears
+    twice in one prompt (typically an unchanged starter file showing up in both
+    {assignment_files} and {submission_files}) is sent once and pointed to after."""
+
+    def __init__(self) -> None:
+        self._seen: dict[str, str] = {}
+
+    def first_name_for(self, name: str, data: str) -> Optional[str]:
+        """The name this content was first emitted under, or None (and record it now).
+        Trivially small content is never deduplicated."""
+        if len(data.strip()) < 40:
+            return None
+        digest = hashlib.sha256(data.encode('utf-8')).hexdigest()
+        if digest in self._seen:
+            return self._seen[digest]
+        self._seen[digest] = name
+        return None
 
 
 @dataclass(frozen=True)
@@ -60,21 +111,23 @@ class VariableContext:
     # tuple of {'name', 'content'} dicts, or None outside previews. Only consulted by
     # the submission-dependent resolvers when ``submission`` is None.
     demo_files: 'Optional[tuple]' = None
+    # Set by resolve_template for the duration of one resolution (see _ContentDedup).
+    dedup: Optional[_ContentDedup] = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
 class PromptVariable:
     """A registered template variable.
 
-    ``resolver(context, argument)`` returns the replacement text, or ``None`` when the
-    variable can't be resolved in this context (rendered as an ``(unavailable: …)``
-    marker). ``list_arguments(context)`` powers autocomplete for parameterized
+    ``resolver(context, argument)`` returns the replacement text (or a ``Resolved``
+    carrying image attachments), or ``None`` when the variable can't be resolved in this
+    context (rendered as an ``(unavailable: …)`` marker). ``list_arguments(context)`` powers autocomplete for parameterized
     variables; ``validate_argument(context, argument)`` returns an error message for a
     bad argument at save time (or ``None``)."""
     name: str
     label: str
     description: str
-    resolver: Callable[[VariableContext, Optional[str]], Optional[str]]
+    resolver: Callable[[VariableContext, Optional[str]], 'Optional[str | Resolved]']
     takes_argument: bool = False
     list_arguments: Optional[Callable[[VariableContext], list[dict]]] = None
     validate_argument: Optional[Callable[[VariableContext, str], Optional[str]]] = None
@@ -103,14 +156,19 @@ class PromptVariableRegistry:
 prompt_variable_registry = PromptVariableRegistry()
 
 
-def substitute_variables(template: str, context: VariableContext) -> tuple[str, set[str]]:
+def resolve_template(template: str, context: VariableContext) -> ResolvedTemplate:
     """Resolve all registered {variable} tokens in ``template``.
 
-    Returns ``(text, used_names)`` where ``used_names`` is the set of registered
-    variable names that appeared (resolved or not). Unknown tokens pass through
-    untouched; a registered token that can't resolve becomes ``(unavailable: <token>)``.
+    ``used`` is the set of registered variable names that appeared (resolved or not).
+    Unknown tokens pass through untouched; a registered token that can't resolve becomes
+    ``(unavailable: <token>)``. ``images`` are the attachments the variables produced,
+    capped at MAX_PROMPT_IMAGES (extras are noted in the text). Identical file contents
+    (by hash) are emitted or attached once per resolution; later occurrences become a
+    short pointer to the first.
     """
     used: set[str] = set()
+    images: list[ImageAttachment] = []
+    context = replace(context, dedup=_ContentDedup())
 
     def _sub(m: re.Match) -> str:
         name, argument = m.group(1), m.group(2)
@@ -124,9 +182,26 @@ def substitute_variables(template: str, context: VariableContext) -> tuple[str, 
                 value = variable.resolver(context, argument)
             except Exception:
                 logger.exception("Prompt variable '%s' failed to resolve", m.group(0))
-        return value if value is not None else f"(unavailable: {m.group(0)})"
+        if value is None:
+            return f"(unavailable: {m.group(0)})"
+        if isinstance(value, str):
+            return value
+        text = value.text
+        for image in value.images:
+            if len(images) >= MAX_PROMPT_IMAGES:
+                text += f"\n(image '{image.name}' omitted — at most {MAX_PROMPT_IMAGES} images per prompt)"
+                continue
+            images.append(image)
+        return text
 
-    return TOKEN_RE.sub(_sub, template), used
+    text = TOKEN_RE.sub(_sub, template)
+    return ResolvedTemplate(text=text, used=used, images=tuple(images))
+
+
+def substitute_variables(template: str, context: VariableContext) -> tuple[str, set[str]]:
+    """Text-only view of ``resolve_template``: ``(text, used_names)``."""
+    resolved = resolve_template(template, context)
+    return resolved.text, resolved.used
 
 
 def validate_template(template: str, context: VariableContext) -> list[str]:
@@ -228,6 +303,20 @@ def _visible_assignment_files(assignment):
     return assignment.files.filter(hidden=False, is_test_resource=False)
 
 
+def _image_attachment(name: str, data: str) -> Optional[ImageAttachment]:
+    """The ImageAttachment for a File.data that is a data URI of a provider-accepted
+    image type, else None (text, PDFs, SVG, other binaries)."""
+    if not data.startswith('data:'):
+        return None
+    header, sep, encoded = data.partition(',')
+    if not sep or ';base64' not in header:
+        return None
+    mime = header[5:].split(';', 1)[0].strip().lower()
+    if mime not in PROMPT_IMAGE_MIMES:
+        return None
+    return ImageAttachment(name=name, mime=mime, base64_data=encoded)
+
+
 def _file_content_for_prompt(name: str, data: str) -> str:
     """Turn a stored File.data into readable prompt text based on its type: PDFs are
     extracted to markdown (never emitted as raw base64), notebooks to enumerated cells,
@@ -239,14 +328,43 @@ def _file_content_for_prompt(name: str, data: str) -> str:
     if lower.endswith('.ipynb'):
         from core.services.ai_service import _format_notebook_as_cells
         return _format_notebook_as_cells(data)
+    if data.startswith('data:'):
+        # Other binary files — never emit raw base64 into a prompt.
+        return f"(binary file '{name}' not shown)"
     return data
 
 
-def _format_file_block(name: str, content: str, cap: int) -> str:
+def _already_sent_as(ctx: Optional[VariableContext], name: str, data: str) -> Optional[str]:
+    """The name this exact content was already emitted under earlier in the prompt, else
+    None. No-op outside resolve_template (ctx None or no dedup)."""
+    if ctx is None or ctx.dedup is None:
+        return None
+    return ctx.dedup.first_name_for(name, data)
+
+
+def _format_file_block(name: str, content: str, cap: int, ctx: Optional[VariableContext] = None) -> str:
+    first = _already_sent_as(ctx, name, content)
+    if first is not None:
+        return f"### {name}\n(identical to '{first}' above — not repeated)"
     content = _file_content_for_prompt(name, content)
     if len(content) > cap:
         content = content[:cap] + "\n... (truncated)"
     return f"### {name}\n```\n{content}\n```"
+
+
+def _format_file(ctx: VariableContext, name: str, data: str, cap: int, attach_images: bool) -> Resolved:
+    """A file as prompt content: an image becomes an attachment plus a marker when
+    ``attach_images`` is set (and a pointer to the *_with_images variable when not);
+    anything else is a text block."""
+    image = _image_attachment(name, data)
+    if image is None:
+        return Resolved(_format_file_block(name, data, cap, ctx))
+    if not attach_images:
+        return Resolved(f"(image '{name}' omitted — use {{assignment_files_with_images}} to attach it)")
+    first = _already_sent_as(ctx, name, data)
+    if first is not None:
+        return Resolved(f"(image '{name}' is identical to '{first}', already attached above)")
+    return Resolved(f"(image attached: {name})", (image,))
 
 
 def _resolve_assignment_name(ctx, argument):
@@ -264,12 +382,23 @@ def _resolve_assignment_description(ctx, argument):
     return "\n\n".join(parts) if parts else "(no assignment description)"
 
 
-def _resolve_assignment_files(ctx, argument):
+def _resolve_assignment_files_impl(ctx, attach_images: bool):
     if ctx.assignment is None:
         return None
-    blocks = [_format_file_block(af.name, af.data, ASSIGNMENT_FILE_CHAR_CAP)
-              for af in _visible_assignment_files(ctx.assignment)]
-    return "\n\n".join(blocks) if blocks else "(no assignment files)"
+    parts = [_format_file(ctx, af.name, af.data, ASSIGNMENT_FILE_CHAR_CAP, attach_images)
+             for af in _visible_assignment_files(ctx.assignment)]
+    if not parts:
+        return "(no assignment files)"
+    images = tuple(img for part in parts for img in part.images)
+    return Resolved("\n\n".join(part.text for part in parts), images)
+
+
+def _resolve_assignment_files(ctx, argument):
+    return _resolve_assignment_files_impl(ctx, attach_images=False)
+
+
+def _resolve_assignment_files_with_images(ctx, argument):
+    return _resolve_assignment_files_impl(ctx, attach_images=True)
 
 
 def _resolve_assignment_file(ctx, argument):
@@ -278,7 +407,8 @@ def _resolve_assignment_file(ctx, argument):
     af = _visible_assignment_files(ctx.assignment).filter(name=argument).first()
     if af is None:
         return None
-    return _format_file_block(af.name, af.data, ASSIGNMENT_FILE_CHAR_CAP)
+    # Naming a file is opt-in, so an image named here is attached.
+    return _format_file(ctx, af.name, af.data, ASSIGNMENT_FILE_CHAR_CAP, attach_images=True)
 
 
 def _list_assignment_file_arguments(ctx):
@@ -306,7 +436,7 @@ def _resolve_course_file(ctx, argument):
     cf = ctx.course.files.filter(name=argument).select_related('content').first()
     if cf is None:
         return None
-    return _format_file_block(cf.name, cf.content.data, COURSE_FILE_CHAR_CAP)
+    return _format_file(ctx, cf.name, cf.content.data, COURSE_FILE_CHAR_CAP, attach_images=True)
 
 
 def _list_course_file_arguments(ctx):
@@ -356,10 +486,17 @@ def _submission_context(ctx):
 def _resolve_submission_files(ctx, argument):
     if ctx.submission is None:
         if ctx.demo_files is not None:
-            return "\n\n".join(_format_file_block(f['name'], f['content'], SUBMISSION_FILE_CHAR_CAP)
+            return "\n\n".join(_format_file_block(f['name'], f['content'], SUBMISSION_FILE_CHAR_CAP, ctx)
                                for f in ctx.demo_files) or "(the submission has no files)"
         return None
-    blocks = [f"### {f['name']}\n```\n{f['content']}\n```" for f in _submission_context(ctx)['files']]
+    blocks = []
+    for f in _submission_context(ctx)['files']:
+        # Content here is already extracted/capped; dedup on the raw data it came from.
+        first = _already_sent_as(ctx, f['name'], f['data'])
+        if first is not None:
+            blocks.append(f"### {f['name']}\n(identical to '{first}' above — not repeated)")
+        else:
+            blocks.append(f"### {f['name']}\n```\n{f['content']}\n```")
     return "\n\n".join(blocks) if blocks else "(the submission has no files)"
 
 
@@ -369,12 +506,12 @@ def _resolve_submission_file(ctx, argument):
             df = next((f for f in ctx.demo_files if f['name'] == argument), None)
             if df is None:
                 return f"(no file named '{argument}' in this submission)"
-            return _format_file_block(df['name'], df['content'], SUBMISSION_FILE_CHAR_CAP)
+            return _format_file_block(df['name'], df['content'], SUBMISSION_FILE_CHAR_CAP, ctx)
         return None
     sf = ctx.submission.files.filter(name=argument).first()
     if sf is None:
         return f"(no file named '{argument}' in this submission)"
-    return _format_file_block(sf.name, sf.data, SUBMISSION_FILE_CHAR_CAP)
+    return _format_file_block(sf.name, sf.data, SUBMISSION_FILE_CHAR_CAP, ctx)
 
 
 def _list_submission_file_arguments(ctx):
@@ -426,7 +563,7 @@ def _resolve_student_dataset(ctx, argument):
             "[student_dataset] Variant '%s' (dataset %s, %d chars) exceeds the %d-char cap "
             "and will be truncated in the generation prompt.",
             filename, dataset.id, len(content), STUDENT_DATASET_CHAR_CAP)
-    return _format_file_block(filename, content, STUDENT_DATASET_CHAR_CAP)
+    return _format_file_block(filename, content, STUDENT_DATASET_CHAR_CAP, ctx)
 
 
 def _resolve_num_questions(ctx, argument):
@@ -450,18 +587,26 @@ for _variable in [
         resolver=_resolve_assignment_description, requires=frozenset({'assignment'})),
     PromptVariable(
         name='assignment_files', label='All assignment files',
-        description='The contents of every student-visible assignment file.',
+        description='The contents of every student-visible assignment file (text only; '
+                    'images are skipped).',
         resolver=_resolve_assignment_files, requires=frozenset({'assignment'})),
     PromptVariable(
+        name='assignment_files_with_images', label='All assignment files, with images',
+        description='The contents of every student-visible assignment file, with images '
+                    '(PNG, JPEG, GIF, WebP) attached for the model to see.',
+        resolver=_resolve_assignment_files_with_images, requires=frozenset({'assignment'})),
+    PromptVariable(
         name='assignment_file', label='Assignment file',
-        description='The contents of one named assignment file.',
+        description='The contents of one named assignment file (an image is attached for '
+                    'the model to see).',
         resolver=_resolve_assignment_file, takes_argument=True,
         list_arguments=_list_assignment_file_arguments,
         validate_argument=_validate_assignment_file_argument,
         requires=frozenset({'assignment'})),
     PromptVariable(
         name='course_file', label='Course file',
-        description='The contents of one course-level file (usable on any quiz, attached or not).',
+        description='The contents of one course-level file (usable on any quiz, attached or '
+                    'not; an image is attached for the model to see).',
         resolver=_resolve_course_file, takes_argument=True,
         list_arguments=_list_course_file_arguments,
         validate_argument=_validate_course_file_argument),

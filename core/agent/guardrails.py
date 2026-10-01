@@ -153,8 +153,13 @@ def require_human_confirmation(tool: str, args: dict, plan: dict, *, ctx,
 
 
 def _confirm_via_elicitation(tool: str, plan: dict, *, ctx, message: str) -> None:
-    dialog = (f'{message}\n\nPlan:\n'
-              f'{json.dumps(plan, indent=2, default=str)[:1500]}\n\n'
+    # The dialog travels through the MCP client, which may log or show it to
+    # the model — so it gets the same student scrub as a tool result. The hash
+    # and the audit row keep the raw plan.
+    from core.agent.privacy import StudentAliasMap
+    safe = StudentAliasMap.for_course(ctx.course)
+    dialog = (f'{safe.scrub(message)}\n\nPlan:\n'
+              f'{json.dumps(safe.scrub(plan), indent=2, default=str)[:1500]}\n\n'
               'Approve to let the agent proceed; decline to cancel.')
     result = ctx.elicit_channel.elicit(
         message=dialog,

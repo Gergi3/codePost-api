@@ -217,8 +217,10 @@ class PythonExecutor(Executor):
             for container_path, host_path in input_mounts.items():
                 volumes[host_path] = {'bind': container_path, 'mode': 'ro'}
         
-        # Build command: use reusable wrapper for pre-script
-        base_command = ["python", "-c", template]
+        # The rendered template is staged into /work as a self-deleting runner
+        # file (never through argv — Linux caps one argument at 128 KiB).
+        runner_filename = ".codepost_runner.py"
+        base_command = ["python", f"/work/{runner_filename}"]
         
         # Wrap with stdin first (logic: cmd < input)
         command_with_stdin = self._wrap_command_with_stdin(base_command)
@@ -241,6 +243,7 @@ class PythonExecutor(Executor):
             return ExecutionResult.error("Failed to create Docker container")
         
         self.add_additional_files(container)
+        self._put_file(container, '/work', runner_filename, template)
         self.add_pre_script(container)  # Inject the pre-script file
         try:
             container.start()
@@ -343,7 +346,8 @@ class PythonNotebookExecutor(NotebookExecutor):
     TEMPLATE = "notebook_template.py"
     DOCKER_IMAGE = "python:3.12-slim"
     EXECUTABLE_EXTENSIONS = ['.ipynb']
-    EXECUTION_COMMAND = ["python", "-c"]
+    EXECUTION_COMMAND = ["python"]
+    RUNNER_FILENAME = ".codepost_runner.py"
        
     PIP_CACHE_VOLUME_NAME = PythonExecutor.PIP_CACHE_VOLUME_NAME
     

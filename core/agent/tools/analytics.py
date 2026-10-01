@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from core.agent import shaping
 from core.agent.registry import SCOPE_READ, tool
-from core.agent.tools._common import course_header
+from core.agent.tools._common import course_header, resolve_student, unalias
 from core.permissions.capabilities import Capability
 
 _ANALYTICS_BLOCKS = (
@@ -29,7 +29,7 @@ _ANALYTICS_BLOCKS = (
         'properties': {
             'view': {'enum': ['summary', 'rows'], 'default': 'summary'},
             'student': {'type': 'string',
-                        'description': "One student's row by email (implies rows)."},
+                        'description': "One student's row (alias or email; implies rows)."},
             'section': {'type': 'string', 'description': 'Restrict rows to a section name.'},
             'limit': {'type': 'integer', 'default': 25, 'maximum': 100},
             'cursor': {'type': 'string'},
@@ -55,7 +55,8 @@ def get_gradebook(ctx, view: str = 'summary', student: str = '', section: str = 
     if section:
         rows = [r for r in rows if section in (r.get('section') or '')]
     if student:
-        rows = [r for r in rows if r.get('student') == student]
+        email = resolve_student(ctx, student).lower()
+        rows = [r for r in rows if str(r.get('student') or '').lower() == email]
         view = 'rows'
 
     if view == 'summary':
@@ -218,7 +219,9 @@ def get_assignment_analytics(ctx, assignmentId: int, blocks=None, buckets: int =
         'type': 'object',
         'properties': {
             'eventType': {'type': 'string'},
-            'student': {'type': 'string'},
+            'student': {'type': 'string',
+                        'description': 'Actor to filter by: a student alias, or '
+                                       'a staff email.'},
             'assignmentId': {'type': 'integer'},
             'since': {'type': 'string', 'description': 'ISO datetime lower bound.'},
             'until': {'type': 'string', 'description': 'ISO datetime upper bound.'},
@@ -243,7 +246,8 @@ def get_audit_log(ctx, eventType: str = '', student: str = '', assignmentId=None
     if eventType:
         params.append(f'event_type={eventType}')
     if student:
-        params.append(f'student={student}')
+        # unalias, not resolve_student: the actor may be a grader.
+        params.append(f'student={unalias(ctx, student)}')
     if assignmentId is not None:
         params.append(f'assignment={int(assignmentId)}')
     if since:

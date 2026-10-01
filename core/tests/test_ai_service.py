@@ -302,7 +302,7 @@ class TestForConfigConnectionTest(TestCase):
     def test_for_config_portkey_blank_base_url_is_testable(self):
         # _call_portkey falls back to DEFAULT_PORTKEY_URL when base_url is
         # blank — test_connection must accept this config.
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             return ('OK', 3, 1, 4, 0)
 
         svc = AIService.for_config('portkey', api_key='pk-key', base_url='', model='')
@@ -319,7 +319,7 @@ class TestForConfigConnectionTest(TestCase):
     def test_custom_prompt_used_and_clamped(self):
         captured = {}
 
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             captured['user_prompt'] = user_prompt
             return ('4', 3, 1, 4, 0)
 
@@ -332,7 +332,7 @@ class TestForConfigConnectionTest(TestCase):
         self.assertEqual(result['requestUserPrompt'], captured['user_prompt'])
 
     def test_system_prompt_differs_for_custom_prompt(self):
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             return ('OK', 3, 1, 4, 0)
 
         svc = AIService.for_config('portkey', api_key='pk-key')
@@ -343,7 +343,7 @@ class TestForConfigConnectionTest(TestCase):
         self.assertIn('helpful assistant', custom_run['requestSystemPrompt'])
 
     def test_whitespace_prompt_falls_back_to_default_ping(self):
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             return ('OK', 3, 1, 4, 0)
 
         svc = AIService.for_config('portkey', api_key='pk-key')
@@ -355,7 +355,7 @@ class TestForConfigConnectionTest(TestCase):
     def test_model_override_applies_to_request_and_result(self):
         captured = {}
 
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             captured['model'] = self.model
             return ('OK', 3, 1, 4, 0)
 
@@ -366,7 +366,7 @@ class TestForConfigConnectionTest(TestCase):
         self.assertEqual(result['model'], 'gpt-4o')
 
     def test_reported_model_surfaced_from_provider_meta(self):
-        async def fake_dispatch(self, system_prompt, user_prompt):
+        async def fake_dispatch(self, system_prompt, user_prompt, images=()):
             self._last_provider_meta = {'model': 'gemini-3-flash-preview-001'}
             return ('OK', 3, 1, 4, 0)
 

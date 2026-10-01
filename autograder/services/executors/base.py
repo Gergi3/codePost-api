@@ -16,6 +16,7 @@ import logging
 from core.constants import MAX_FILE_SIZE as MAX_FILE_SIZE_CONST, MAX_OUTPUT_SIZE as MAX_OUTPUT_SIZE_CONST
 import os
 import re
+import shlex
 import shutil
 import struct
 import tarfile
@@ -1076,8 +1077,8 @@ class Executor(abc.ABC):
             return command if isinstance(command, list) else command.split()
         
         # Join command if it's a list to form the command string
-        cmd_str = " ".join(command) if isinstance(command, list) else command
-        
+        cmd_str = shlex.join(command) if isinstance(command, list) else command
+
         # Wrap in sh
         return ["sh", "-c", f"{cmd_str} < /tmp/stdin.txt"]
 
@@ -1164,6 +1165,14 @@ class Executor(abc.ABC):
                     self.log(f"Adding to tar: {tar_name} (from {filename})")
                     
                     content_bytes = content.encode('utf-8')
+                    # Data URI content ("data:<mime>;base64,...") is binary — decode so the
+                    # container gets the real file (e.g. an image), not the URI text.
+                    if content.startswith('data:'):
+                        try:
+                            _header, encoded = content.split(',', 1)
+                            content_bytes = base64.b64decode(encoded)
+                        except Exception:
+                            pass
                     tarinfo = tarfile.TarInfo(name=tar_name)
                     tarinfo.size = len(content_bytes)
                     tarinfo.mode = 0o644
@@ -1180,62 +1189,61 @@ class Executor(abc.ABC):
         # Inject absolute files to / (root)
         inject_tar(absolute_files, '/')
 
+    def _put_file(self, container: Any, dest_dir: str, name: str, content: str, mode: int = 0o644) -> None:
+        """
+        Write one text file into the container's writable layer via put_archive.
+
+        `name` is relative to `dest_dir` and may contain sub-directories (Docker
+        creates missing parents). Used for the pre-script and for the per-run
+        runner script, so the rendered template never travels through argv
+        (Linux caps a single argv string at 128 KiB — MAX_ARG_STRLEN).
+        Must be called before container.start(); note /tmp is a tmpfs mounted
+        at start, so files staged there would be hidden — use /work.
+        """
+        from io import BytesIO
+        content_bytes = content.encode('utf-8')
+        tar_stream = BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode='w') as tar:
+            tarinfo = tarfile.TarInfo(name=name)
+            tarinfo.size = len(content_bytes)
+            tarinfo.mode = mode
+            tar.addfile(tarinfo, BytesIO(content_bytes))
+        tar_stream.seek(0)
+        container.put_archive(dest_dir, tar_stream.read())
+
     def add_pre_script(self, container: Any):
         """Inject pre_script as .pre_script.sh file into container"""
         if not self.pre_script:
             return
-        from io import BytesIO
         self.log("Injecting pre-script as .pre_script.sh")
-        
+
         # Normalize line endings (Windows \r\n → Unix \n)
         script_content = self.pre_script.replace('\r\n', '\n').replace('\r', '\n')
         # Ensure a valid shebang so the script can be executed directly
         if not script_content.startswith('#!'):
             script_content = '#!/bin/sh\n' + script_content
-        
-        # Create tar archive with the pre-script file
-        tar_stream = BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode='w') as tar:
-            content_bytes = script_content.encode('utf-8')
-            tarinfo = tarfile.TarInfo(name='.pre_script.sh')
-            tarinfo.size = len(content_bytes)
-            tarinfo.mode = 0o777  # World-writable so any container user can remove it after execution
-            tar.addfile(tarinfo, BytesIO(content_bytes))
-        
-        tar_stream.seek(0)
-        tar_data = tar_stream.read()
-        container.put_archive('/work', tar_data)
+
+        # World-writable so any container user can remove it after execution
+        self._put_file(container, '/work', '.pre_script.sh', script_content, mode=0o777)
 
     def _wrap_command_with_pre_script(self, base_command: List[str]) -> List[str]:
         """
         Wrap a command with pre-script execution if pre_script exists.
-        
-        Flow: ./.pre_script.sh && chmod -x .pre_script.sh && <base_command>
-        
+
+        Flow: sh ./.pre_script.sh && rm .pre_script.sh && <base_command>
+
         Args:
-            base_command: The original command as a list (e.g., ["python", "-c", "code"])
-            
+            base_command: The original command as a list of short tokens
+                (e.g., ["python", "/work/.codepost_runner.py"] or ["sh", "-c", "..."]).
+
         Returns:
             Wrapped command if pre_script exists, otherwise returns base_command unchanged.
         """
         if not self.pre_script:
             return base_command
-        
-        # Convert base command to shell string
-        # Handle both simple commands and commands with complex arguments
-        if len(base_command) == 1:
-            base_cmd_str = base_command[0]
-        elif base_command[0] in ["python", "python3", "Rscript", "node", "java"]:
-            # For interpreter commands, properly escape the last argument
-            if len(base_command) >= 3 and base_command[1] in ["-c", "-e"]:
-                escaped_arg = base_command[2].replace("'", "'\"'\"'")
-                base_cmd_str = f"{base_command[0]} {base_command[1]} '{escaped_arg}'"
-            else:
-                base_cmd_str = " ".join(base_command)
-        else:
-            base_cmd_str = " ".join(base_command)
-        
-        shell_command = f"sh ./.pre_script.sh && rm .pre_script.sh && {base_cmd_str}"
+
+        # shlex.join quotes each token, so a nested ["sh", "-c", "a && b"] survives intact
+        shell_command = f"sh ./.pre_script.sh && rm .pre_script.sh && {shlex.join(base_command)}"
         self.log(f"Wrapping command with pre-script")
         return ["sh", "-c", shell_command]
 
@@ -1291,14 +1299,22 @@ class NotebookExecutor(Executor):
     - TEMPLATE: str - Template filename
     - DOCKER_IMAGE: str - Docker image to use
     - EXECUTABLE_EXTENSIONS: List[str] - File extensions this executor handles
-    - EXECUTION_COMMAND: List[str] - Command prefix (e.g., ['python', '-c'] or ['Rscript', '-e'])
+    - EXECUTION_COMMAND: List[str] - Interpreter prefix (e.g., ['python'] or ['Rscript'])
+    - RUNNER_FILENAME: str - Name of the rendered template staged into /work
+      before the container starts (e.g., '.codepost_runner.py'). The template
+      itself deletes the file as its first statement; the `.codepost_runner`
+      prefix is what that guard keys on.
+
+    The rendered template is never passed through argv (128 KiB per-argument
+    limit); it is staged with `_put_file` and run by path.
     """
-    
+
     LANGUAGE: Optional[str] = None
     TEMPLATE: Optional[str] = None
     DOCKER_IMAGE: Optional[str] = None
     EXECUTABLE_EXTENSIONS: List[str] = []
-    EXECUTION_COMMAND: List[str] = []  # e.g., ['python', '-c'] or ['Rscript', '-e']
+    EXECUTION_COMMAND: List[str] = []  # e.g., ['python'] or ['Rscript']
+    RUNNER_FILENAME: str = ""  # e.g., '.codepost_runner.py'
 
     NOTEBOOK_LANGUAGE_ALIASES: Dict[str, List[str]] = {
         "python": ["python", "python3", "py"],
@@ -1470,7 +1486,12 @@ class NotebookExecutor(Executor):
         if "<<<RESULTS_START>>>" not in stdout or "<<<RESULTS_END>>>" not in stdout:
             # Use the tail of stderr to see the most recent error/traceback
             stderr_preview = stderr[-1000:] if len(stderr) > 1000 else stderr
-            return ExecutionResult.error(f"Failed to extract results: missing markers. Stdout preview: {stdout[:200]} Stderr tail: {stderr_preview}")
+            # Lead with the last non-empty stderr line so the real cause (e.g. a
+            # runc exec error) is the first line of the message, which is what
+            # the stats dashboard samples.
+            stderr_lines = [line.strip() for line in stderr_preview.splitlines() if line.strip()]
+            cause = f"{stderr_lines[-1]}\n" if stderr_lines else ""
+            return ExecutionResult.error(f"{cause}Failed to extract results: missing markers. Stdout preview: {stdout[:200]} Stderr tail: {stderr_preview}")
 
         try:
             results_stdout = stdout.split("<<<RESULTS_START>>>")[1].split("<<<RESULTS_END>>>")[0].strip()
@@ -1501,14 +1522,24 @@ class NotebookExecutor(Executor):
         """
         return []
     
-    def _get_execution_command(self, template: str) -> List[str]:
+    def _get_runner_files(self, template: str) -> Dict[str, str]:
         """
-        Get the command to execute the template.
-        
-        Override in subclasses if needed.
-        Default uses EXECUTION_COMMAND class attribute + template as argument.
+        Files to stage into /work before the container starts (name -> content).
+
+        Override in subclasses that need more than one file (e.g. C++ test mode).
+        Default stages the rendered template as RUNNER_FILENAME.
         """
-        return self.EXECUTION_COMMAND + [template]
+        return {self.RUNNER_FILENAME: template}
+
+    def _get_execution_command(self) -> List[str]:
+        """
+        Get the command to execute the staged runner file.
+
+        Override in subclasses if needed. Must only contain short tokens —
+        never the template itself.
+        Default uses EXECUTION_COMMAND + /work/RUNNER_FILENAME.
+        """
+        return self.EXECUTION_COMMAND + [f"/work/{self.RUNNER_FILENAME}"]
     
     def _needs_network(self, packages_to_install: List[str]) -> bool:
         """
@@ -1554,8 +1585,9 @@ class NotebookExecutor(Executor):
             return ExecutionResult.error("Failed to get code template")
 
         needs_network = self._needs_network(packages_to_install)
-        
-        base_command = self._get_execution_command(template)
+
+        runner_files = self._get_runner_files(template)
+        base_command = self._get_execution_command()
         command = self._wrap_command_with_pre_script(base_command)
         
         container = self.get_container(
@@ -1573,10 +1605,13 @@ class NotebookExecutor(Executor):
             result.stderr = "\n".join(self.executor_logs)
             return result
 
-        
+
         self.add_additional_files(container)
+        # Runner goes in after additional files so it wins any name collision
+        for name, content in runner_files.items():
+            self._put_file(container, '/work', name, content)
         self.add_pre_script(container)  # Inject pre-script file if exists
-        
+
         try:
             container.start()
             self.log("Container started, waiting for execution to complete")

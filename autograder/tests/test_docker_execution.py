@@ -97,6 +97,19 @@ class PythonDockerExecutionTests(SimpleTestCase):
         executor = PythonExecutor(mock_file, test_code=test_code)
         return executor.execute()
 
+    def test_runner_is_unlinked_before_student_code(self):
+        """The staged template must be gone from /work by the time student code runs."""
+        result = self._execute(
+            student_code="import os\nRUNNER_GONE = not os.path.exists('/work/.codepost_runner.py')",
+            test_code="""
+@test(name="runner gone", points=1)
+def test_runner_gone():
+    assert RUNNER_GONE
+""",
+        )
+        self.assertTrue(len(result.tests) >= 1, f"No tests found. stderr: {result.stderr}")
+        self.assertTrue(result.tests[0]["passed"], result.tests[0])
+
     def test_passing_test(self):
         """Basic passing test through full Docker pipeline."""
         result = self._execute(
@@ -592,6 +605,20 @@ def wrong():
         self.assertFalse(t["passed"])
         self.assertEqual(t["status"], "failed")
 
+    def test_large_notebook_over_arg_max(self):
+        """Regression: a notebook larger than the 128 KiB argv limit used to fail
+        at container start with 'argument list too long'."""
+        result = self._execute(
+            cells=['big = "' + ("a" * 200_000) + '"', "n = len(big)"],
+            test_code="""
+@test(name="big cell ran", points=1)
+def check():
+    assert n == 200_000
+""",
+        )
+        self.assertTrue(len(result.tests) >= 1, f"No tests. err: {result.err}\nstderr: {result.stderr[-500:]}")
+        self.assertTrue(result.tests[0]["passed"], result.tests[0])
+
 
 # ###################################################################
 # Node.js Notebook Executor — Docker Tests
@@ -663,6 +690,22 @@ class Tests {
         self.assertTrue(len(result.tests) >= 1, f"No tests. stdout: {result.stdout}\nstderr: {result.stderr}")
         self.assertTrue(result.tests[0]["passed"])
 
+    def test_runner_source_removed_after_compile(self):
+        """NotebookRunner.java is rm'd before the class runs, so cells cannot read it."""
+        result = self._execute(
+            cells=["boolean runnerGone = !new java.io.File(\"/work/NotebookRunner.java\").exists();"],
+            test_code="""
+class Tests {
+    @Test(name = "runner gone", points = 1)
+    public void testRunnerGone() {
+        assertTrue(runnerGone, "NotebookRunner.java still on disk");
+    }
+}
+""",
+        )
+        self.assertTrue(len(result.tests) >= 1, f"No tests. stdout: {result.stdout}\nstderr: {result.stderr}")
+        self.assertTrue(result.tests[0]["passed"], result.tests[0])
+
 
 # ###################################################################
 # R Notebook Executor — Docker Tests
@@ -690,6 +733,20 @@ run_test("check val", 5, function() {
         )
         self.assertTrue(len(result.tests) >= 1, f"No tests. stdout: {result.stdout}\nstderr: {result.stderr}")
         self.assertTrue(result.tests[0]["passed"])
+
+    def test_large_notebook_over_arg_max(self):
+        """Regression: a notebook larger than the 128 KiB argv limit used to fail
+        at container start with 'argument list too long'."""
+        result = self._execute(
+            cells=['big <- "' + ("a" * 200_000) + '"', "n <- nchar(big)"],
+            test_code="""
+run_test("big cell ran", 1, function() {
+    stopifnot(n == 200000)
+})
+""",
+        )
+        self.assertTrue(len(result.tests) >= 1, f"No tests. err: {result.err}\nstderr: {result.stderr[-500:]}")
+        self.assertTrue(result.tests[0]["passed"], result.tests[0])
 
 
 # ###################################################################

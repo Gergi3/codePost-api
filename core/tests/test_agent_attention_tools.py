@@ -148,15 +148,18 @@ class TestManageRegrades:
 class TestQuizAccommodations:
 
     def test_set_and_list(self, api_client, key, course):
+        from core.agent.privacy import alias_for
         from core.models import QuizAccommodation
         student = course.students.first()
+        alias = alias_for(course.id, student.email)
         result = call(api_client, key, "codepost_set_quiz_accommodation",
                       {"op": "set", "student": student.email,
                        "timeMultiplier": 1.5, "sebExempt": True})
         assert result["isError"] is False
         data = result["structuredContent"]["data"]
         assert data["revoked"] is False
-        assert data["accommodation"]["student"] == student.email
+        # The model never sees the address, only the course-stable alias.
+        assert data["accommodation"]["student"] == alias
 
         row = QuizAccommodation.objects.get(course=course, student=student)
         assert float(row.timeMultiplier) == 1.5
@@ -165,7 +168,7 @@ class TestQuizAccommodations:
         listing = call(api_client, key, "codepost_set_quiz_accommodation",
                        {"op": "list"})
         rows = listing["structuredContent"]["data"]["accommodations"]
-        assert any(r["student"] == student.email for r in rows)
+        assert any(r["student"] == alias for r in rows)
 
     def test_revoke_via_multiplier_one(self, api_client, key, course):
         from core.models import QuizAccommodation

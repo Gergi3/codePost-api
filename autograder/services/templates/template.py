@@ -2,6 +2,17 @@
 # The following is a template for running code which is meant to be used by the autograder,
 # This will run inline inside a docker container.
 
+# The executor stages this script as /work/.codepost_runner.py; unlink it as the
+# very first statement so the harness/test code lives on disk only until Python
+# has read it (Python compiles the whole file before executing line 1). Guarded
+# by name so local/test runs of the template are unaffected.
+import os
+if os.path.basename(globals().get("__file__", "")).startswith(".codepost_runner"):
+    try:
+        os.unlink(__file__)
+    except OSError:
+        pass
+
 # START OF PACKAGE INSTALLATION TEMPLATE
 import subprocess
 import sys
@@ -21,6 +32,31 @@ os.environ['PIP_ROOT_USER_ACTION'] = 'ignore'
 if 'PIP_CACHE_DIR' not in os.environ:
     os.environ['PIP_CACHE_DIR'] = '/tmp/pip-cache'
 os.environ['MPLBACKEND'] = 'Agg'  # For matplotlib headless
+
+# Student-facing tracebacks: hide this template's own frames and show source
+# lines for the student's pseudo-file (it never exists on disk, so linecache has
+# to be primed by hand). The instructor test script is deliberately NOT
+# registered, so tracebacks never reveal its source.
+import linecache
+from traceback import StackSummary, TracebackException
+
+_HIDDEN_TB_FILES = {globals().get("__file__", ""), "<string>"}
+
+
+def _register_source(pseudo_file: str, source: str) -> None:
+    # mtime=None entries survive linecache.checkcache()
+    linecache.cache[pseudo_file] = (len(source), None, source.splitlines(True), pseudo_file)
+
+
+def _format_student_traceback(exc: BaseException) -> str:
+    te = TracebackException.from_exception(exc)
+    node: Optional[TracebackException] = te
+    while node is not None:
+        node.stack = StackSummary.from_list(
+            [f for f in node.stack if f.filename not in _HIDDEN_TB_FILES]
+        )
+        node = node.__cause__ or node.__context__
+    return "".join(te.format())
 
 
 def template_log(message: str, level:str) -> None:
@@ -258,7 +294,7 @@ class TestCase:
             result.passed = False
             result.score = 0
             result.status = "error"
-            result.error = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            result.error = f"{type(e).__name__}: {str(e)}\n{_format_student_traceback(e)}"
             result.output = stdout_capture.getvalue()
 
             
@@ -355,19 +391,20 @@ try:
 
     student_code = base64.b64decode(student_code_b64).decode("utf-8")
 
+    _register_source(STUDENT_PSEUDO_FILE, student_code)
     _exec_with_pseudo_file(student_code, STUDENT_PSEUDO_FILE)
-except (SyntaxError, IndentationError, TabError):
+except (SyntaxError, IndentationError, TabError) as e:
     STUDENT_CODE_SYNTAX_INVALID = True
-    STUDENT_CODE_SYNTAX_ERROR_MSG = traceback.format_exc()
+    STUDENT_CODE_SYNTAX_ERROR_MSG = _format_student_traceback(e)
     print(
         "Student Code Syntax Error:\n"
         f"{STUDENT_CODE_SYNTAX_ERROR_MSG}",
         file=sys.stderr,
     )
-except Exception:
+except Exception as e:
     # If the student code crashes at top-level, we print the error
     # but we still proceed to run tests (which will likely fail if they depend on defined functions)
-    print(f"Student Code Runtime Error:\n{traceback.format_exc()}", file=sys.stderr)
+    print(f"Student Code Runtime Error:\n{_format_student_traceback(e)}", file=sys.stderr)
 
 try:
     # Inject instructor tests here

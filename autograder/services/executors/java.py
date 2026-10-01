@@ -96,9 +96,10 @@ class JavaExecutor(Executor):
         volumes = self._get_volume_mounts(temp_staging_dir if self.datasets else "")
         docker_env = self._get_docker_environment()
         
-        # Prepare Command
-        code_b64 = base64.b64encode(code.encode('utf-8')).decode('utf-8')
-        source_relative_path_q = shlex.quote(source_relative_path)
+        # Sources are staged into /work via _put_file before start (never
+        # through argv — Linux caps one argument at 128 KiB). put_archive
+        # creates missing parent directories.
+        runner_files = {source_relative_path: code}
 
         # Normalize package-declared Java sources into package paths so javac can
         # resolve cross-file references (e.g., Main.java -> Helper.java) even when
@@ -124,25 +125,21 @@ class JavaExecutor(Executor):
             if not template:
                 return ExecutionResult.error("Failed to load Java test template")
                 
-            template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-            
-            # Command: Write Student Code -> Write TestRunner -> Compile Both -> Run TestRunner
+            runner_files["TestRunner.java"] = template
+
+            # Command: Compile Both -> drop the TestRunner source -> Run TestRunner
             # We assume the student class is "Main" or whatever filename is, and TestRunner calls it.
             # NOTE: Student code must be public or compatible.
-            
+
             cmd_str = (
-                f"mkdir -p $(dirname {source_relative_path_q}) && "
-                f"echo '{code_b64}' | base64 -d > {source_relative_path_q} && "
-                f"echo '{template_b64}' | base64 -d > TestRunner.java && "
                 f"{normalize_sources_cmd} && "
                 f"{compile_all_cmd} && "
+                f"rm -f TestRunner.java && "
                 f"java -ea TestRunner"
             )
         else:
             # --- Standard Execution Mode ---
             cmd_str = (
-                f"mkdir -p $(dirname {source_relative_path_q}) && "
-                f"echo '{code_b64}' | base64 -d > {source_relative_path_q} && "
                 f"{normalize_sources_cmd} && "
                 f"{compile_all_cmd} && "
                 f"java -ea -cp . {shlex.quote(run_classname)}"
@@ -162,13 +159,15 @@ class JavaExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        for name, content in runner_files.items():
+            self._put_file(container, '/work', name, content)
+
         try:
             container.start()
             result = container.wait(timeout=self.DEFAULT_TIMEOUT)
             stdout = container.logs(stdout=True, stderr=False).decode('utf-8', errors='replace')
             stderr = container.logs(stdout=False, stderr=True).decode('utf-8', errors='replace')
-            
+
             # Parse Test Results (if any)
             stdout, stderr, test_results = self.parse_test_results(stdout, stderr)
             
@@ -202,6 +201,7 @@ class JavaNotebookExecutor(NotebookExecutor):
     DOCKER_IMAGE = "eclipse-temurin:21-jdk"
     EXECUTABLE_EXTENSIONS = ['.ipynb']
     EXECUTION_COMMAND = ["java"]  # Will be overridden in _get_execution_command
+    RUNNER_FILENAME = "NotebookRunner.java"  # class name is forced to NotebookRunner in _get_code_template
 
     @classmethod
     def is_executable(cls, file_name: Optional[str] = None, extension: Optional[str] = None, code: Optional[str] = None) -> bool:
@@ -218,42 +218,12 @@ class JavaNotebookExecutor(NotebookExecutor):
 
         return cls.notebook_matches_language(code, ['java', 'ijava'])
 
-    def _get_execution_command(self, template: str) -> List[str]:
+    def _get_execution_command(self) -> List[str]:
         """
-        Get the command to execute the Java template.
-        
-        For Java, we write the template to a file and compile/run it.
+        Compile the staged NotebookRunner.java, drop the source, run the class.
+        (The base execute() stages RUNNER_FILENAME into /work before start.)
         """
-        
-        # Write template to a temp file
-        # Since we are running in docker, we can't write to /work easily from here if we want to RUN `javac /work/file`.
-        # Wait, `NotebookExecutor.execute` calls this to get a command list.
-        # But `NotebookExecutor.execute` assumes `command` is passed to `get_container`.
-        # And `get_container` runs the command.
-        
-        # If we return ["sh", "-c", "..."], we need to put the template content somehow.
-        # PythonExecutor does `python -c template`.
-        # Java template is too large for command line likely?
-        # `notebook_template.java` is large (parsed JSON etc).
-        
-        # Strategy: Use Base64 echo trick like JavaExecutor above.
-        
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        
-        # We need a filename for the class. 
-        # `notebook_template.java` defines `public class notebook_template`?
-        # I should check the class name in `notebook_template.java`.
-        
-        # Assuming class name is `Executor` or no public class?
-        # If I write to `NotebookRunner.java`, class should be `NotebookRunner`.
-        # I'll check `notebook_template.java` content quickly below task boundary if needed?
-        # I moved it.
-        
-        # Default behavior:
-        # echo B64 | base64 -d > NotebookRunner.java && javac NotebookRunner.java && java NotebookRunner
-        # Note: Depending on template content.
-        
-        return ["sh", "-c", f"echo '{template_b64}' | base64 -d > NotebookRunner.java && javac NotebookRunner.java && java NotebookRunner"]
+        return ["sh", "-c", "javac NotebookRunner.java && rm -f NotebookRunner.java && java NotebookRunner"]
 
     def _get_code_template(self, code: str, packages_to_install: List[str], test_code: str = "") -> Optional[str]:
         """Get the Java notebook template with cells substituted."""
