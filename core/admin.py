@@ -2243,7 +2243,7 @@ def _preview(text: Optional[str], length: int = 80) -> str:
 def _pretty_json(value: Any) -> str:
     """Render a JSON blob as a scrollable <pre> block for readonly admin fields."""
     if not value:
-        return format_html('<em style="color:#999;">(empty)</em>')
+        return mark_safe('<em style="color:#999;">(empty)</em>')
     return format_html(
         '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; '
         'font-size:12px; background:#f6f8fa; padding:8px; border-radius:4px;">{}</pre>',
@@ -2405,8 +2405,8 @@ class QuizAdmin(admin.ModelAdmin):
 
     def published_status(self, obj: Quiz) -> str:
         if obj.isPublished:
-            return format_html('<span style="color:#2e7d32; font-weight:600;">&#9679; Published</span>')
-        return format_html('<span style="color:#9e9e9e;">&#9675; Unpublished</span>')
+            return mark_safe('<span style="color:#2e7d32; font-weight:600;">&#9679; Published</span>')
+        return mark_safe('<span style="color:#9e9e9e;">&#9675; Unpublished</span>')
     published_status.short_description = "Published"
     published_status.admin_order_field = "isPublished"
 
@@ -2492,8 +2492,8 @@ class QuizAttemptAdmin(admin.ModelAdmin):
 
     def status_badge(self, obj: QuizAttempt) -> str:
         if obj.status == "submitted":
-            return format_html('<span style="color:#2e7d32; font-weight:600;">Submitted</span>')
-        return format_html('<span style="color:#e65100; font-weight:600;">In progress</span>')
+            return mark_safe('<span style="color:#2e7d32; font-weight:600;">Submitted</span>')
+        return mark_safe('<span style="color:#e65100; font-weight:600;">In progress</span>')
     status_badge.short_description = "Status"
     status_badge.admin_order_field = "status"
 
@@ -2601,7 +2601,7 @@ class GeneratedQuestionSetAdmin(admin.ModelAdmin):
     def raw_model_output(self, obj: GeneratedQuestionSet) -> str:
         raw = (obj.generationMetadata or {}).get("raw_output")
         if not raw:
-            return format_html('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
+            return mark_safe('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
                                'or the output parsed cleanly)</em>')
         return format_html(
             '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; font-size:12px; '
