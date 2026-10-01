@@ -603,7 +603,12 @@ if CHANNEL_LAYER_REDIS_URL:
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
-                "hosts": [CHANNEL_LAYER_REDIS_URL],
+                # channels_redis waits for messages with BZPOPMIN(timeout=5). redis-py 8
+                # defaults socket_timeout to 5 s as well, so the client gives up just before
+                # the server's empty reply arrives and the TimeoutError tears down the consumer
+                # (the environment shell websocket dropped ~5 s after connecting). Keep the
+                # socket timeout above channels_redis's brpop_timeout.
+                "hosts": [{"address": CHANNEL_LAYER_REDIS_URL, "socket_timeout": 30}],
             },
         }
     }
