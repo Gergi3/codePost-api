@@ -1,7 +1,7 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
 import json
 
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.db.models import Count, Q, F
 from django.utils.html import format_html
 from django.urls import reverse, path
@@ -2250,6 +2250,16 @@ def _pretty_json(value: Any) -> str:
         json.dumps(value, indent=2, ensure_ascii=False, default=str))
 
 
+def _raw_output_block(raw: Optional[str]) -> str:
+    """Render a rejected model output for readonly admin fields (red-tinted <pre>)."""
+    if not raw:
+        return mark_safe('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
+                           'or the output parsed cleanly)</em>')
+    return format_html(
+        '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; font-size:12px; '
+        'background:#fff8f6; padding:8px; border-radius:4px;">{}</pre>', raw)
+
+
 def _error_cell(text: Optional[str]) -> str:
     if not text:
         return "\u2014"
@@ -2581,6 +2591,7 @@ class GeneratedQuestionSetAdmin(admin.ModelAdmin):
                     "approvedBy", "approvedAt", "modified")
     list_filter = ("status", HasGenerationErrorFilter, "created")
     search_fields = ("quiz__title", "student__email", "generationBatch", "errorMessage")
+    actions = ["regenerate_selected"]
     autocomplete_fields = ["quiz"]
     raw_id_fields = ("student", "submission", "approvedBy", "promptVariant")
     readonly_fields = ("errorMessage", "raw_model_output", "section_prompts", "generation_metadata",
@@ -2599,14 +2610,30 @@ class GeneratedQuestionSetAdmin(admin.ModelAdmin):
     question_count.admin_order_field = "question_count"
 
     def raw_model_output(self, obj: GeneratedQuestionSet) -> str:
-        raw = (obj.generationMetadata or {}).get("raw_output")
-        if not raw:
-            return mark_safe('<em style="color:#999;">(none recorded \u2014 the provider call itself failed, '
-                               'or the output parsed cleanly)</em>')
-        return format_html(
-            '<pre style="max-height:480px; overflow:auto; white-space:pre-wrap; font-size:12px; '
-            'background:#fff8f6; padding:8px; border-radius:4px;">{}</pre>', raw)
+        return _raw_output_block((obj.generationMetadata or {}).get("raw_output"))
     raw_model_output.short_description = "Raw model output"
+
+    @admin.action(description="Regenerate questions (force, unless the student has attempted)")
+    def regenerate_selected(self, request: Any, queryset: Any) -> None:
+        """Re-run generation for the selected sets — the same path as the staff
+        'regenerate' button. A set whose student already attempted the quiz is skipped
+        (reset their attempts first), so an in-progress attempt is never disturbed."""
+        from core.tasks import generate_personalized_quiz_sets
+        started = skipped = 0
+        for gen_set in queryset.select_related("quiz"):
+            if gen_set.questions.exists() and gen_set.quiz.attempts.filter(student_id=gen_set.student_id).exists():
+                skipped += 1
+                continue
+            GeneratedQuestionSet.objects.filter(pk=gen_set.pk).update(
+                status="pending", approvedBy=None, approvedAt=None)
+            generate_personalized_quiz_sets.delay(
+                gen_set.submission_id, quiz_id=gen_set.quiz_id, force=True,
+                requested_by_id=request.user.id, student_id=gen_set.student_id)
+            started += 1
+        msg = f"Queued regeneration for {started} set(s)."
+        if skipped:
+            msg += f" Skipped {skipped} whose student has already attempted the quiz."
+        self.message_user(request, msg, level=messages.WARNING if skipped else messages.SUCCESS)
 
     def section_prompts(self, obj: GeneratedQuestionSet) -> str:
         return _pretty_json((obj.generationMetadata or {}).get("sections"))
@@ -2673,18 +2700,57 @@ class QuizSuggestionJobAdmin(admin.ModelAdmin):
                      "taskId", "errorMessage")
     autocomplete_fields = ["course", "assignment", "quiz"]
     raw_id_fields = ("sourceQuestion", "requestedBy")
-    readonly_fields = ("errorMessage", "result_data", "taskId", "generationBatch", "created", "modified")
+    readonly_fields = ("errorMessage", "raw_model_output", "result_data", "taskId", "generationBatch",
+                       "created", "modified")
     exclude = ("resultData",)
     date_hierarchy = "created"
+    actions = ["retry_generation"]
 
     def error(self, obj: QuizSuggestionJob) -> str:
         return _error_cell(obj.errorMessage)
     error.short_description = "Error"
     error.admin_order_field = "errorMessage"
 
+    def raw_model_output(self, obj: QuizSuggestionJob) -> str:
+        return _raw_output_block((obj.resultData or {}).get("raw_output"))
+    raw_model_output.short_description = "Raw model output"
+
     def result_data(self, obj: QuizSuggestionJob) -> str:
-        return _pretty_json(obj.resultData)
+        data = dict(obj.resultData or {})
+        data.pop("raw_output", None)
+        return _pretty_json(data)
     result_data.short_description = "Result data"
+
+    @admin.action(description="Retry generation (new job, same request)")
+    def retry_generation(self, request: Any, queryset: Any) -> None:
+        """Re-run a failed suggestion job as a NEW job with the parameters the task
+        recorded on it. Section-preview jobs (quiz set) and jobs from before the
+        request was recorded are skipped — they can't be reproduced from the row."""
+        from core.tasks import generate_quiz_question_suggestions
+        started = skipped = 0
+        for job in queryset:
+            params = (job.resultData or {}).get("request")
+            if job.quiz_id is not None or not params or not (job.assignment_id or job.sourceQuestion_id):
+                skipped += 1
+                continue
+            new_job = QuizSuggestionJob.objects.create(
+                course=job.course, assignment=job.assignment, sourceQuestion=job.sourceQuestion,
+                requestedBy=request.user)
+            task = generate_quiz_question_suggestions.delay(
+                requested_by_id=request.user.id,
+                assignment_id=job.assignment_id,
+                source_question_id=job.sourceQuestion_id,
+                num_questions=params.get("num_questions", 5),
+                question_types=params.get("question_types"),
+                instructions=params.get("instructions") or "",
+                job_id=new_job.id,
+            )
+            QuizSuggestionJob.objects.filter(pk=new_job.pk).update(taskId=task.id)
+            started += 1
+        msg = f"Started {started} new generation job(s)."
+        if skipped:
+            msg += f" Skipped {skipped} (preview jobs, or no recorded request to replay)."
+        self.message_user(request, msg, level=messages.WARNING if skipped else messages.SUCCESS)
 
 
 @admin.register(QuizImage)

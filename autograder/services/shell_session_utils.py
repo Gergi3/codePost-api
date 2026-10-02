@@ -29,7 +29,8 @@ def format_mounts(volumes: Dict[str, Dict[str, str]]) -> list[dict]:
     for host_path, mount in volumes.items():
         container_path = mount.get("bind", "")
         mount_type = "other"
-        if "/shared/" in container_path or "/dataset" in container_path.lower():
+        # Datasets land under /shared/ by default, or in /work/ via a `./` / `~/` mount path.
+        if "/shared/" in container_path or "/dataset" in container_path.lower() or container_path.startswith("/work/"):
             mount_type = "dataset"
         mounts.append(
             {

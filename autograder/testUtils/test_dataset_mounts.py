@@ -94,6 +94,41 @@ class TestDatasetMounting(unittest.TestCase):
         'WORKER_DATASET_ROOT': '/assignment_datasets',
         'HOST_DATASET_ROOT': '/mnt/datasets'
     })
+    def test_prefixes_resolve_like_the_generated_image(self, mock_chmod, mock_exists, mock_copy):
+        """Generated images have WORKDIR /work, HOME /home/codepost, and ~/shared, ./shared and
+        /srv/shared all symlinked to /shared. The relative spellings of the shared folder bind
+        at /shared/...; absolute paths bind exactly where typed; `./` is the working dir; `~/`
+        is the codepost home. A trailing slash still appends the dataset name."""
+        mock_exists.return_value = True
+        bind = "/mnt/datasets/test.csv"
+
+        for mount_path, expected in [
+            ("~/shared/housing.csv", "/shared/housing.csv"),
+            ("/home/codepost/shared/housing.csv", "/home/codepost/shared/housing.csv"),
+            ("/srv/shared/housing.csv", "/srv/shared/housing.csv"),
+            ("/srv/shared/", "/srv/shared/test_dataset"),
+            ("./shared/housing.csv", "/shared/housing.csv"),
+            ("/shared/housing.csv", "/shared/housing.csv"),
+            ("shared/housing.csv", "/shared/housing.csv"),
+            ("~/shared/", "/shared/test_dataset"),
+            ("./housing.csv", "/work/housing.csv"),
+            ("~/housing.csv", "/home/codepost/housing.csv"),
+            ("./data/", "/work/data/test_dataset"),
+            ("~/", "/home/codepost/test_dataset"),
+            (".", "/work/test_dataset"),
+            ("~", "/home/codepost/test_dataset"),
+        ]:
+            self.dataset_mock.mount_path = mount_path
+            mounts = self.executor._prepare_dataset_staging("/tmp/staging")
+            self.assertEqual(mounts[bind]['bind'], expected, mount_path)
+
+    @patch('shutil.copy2')
+    @patch('os.path.exists')
+    @patch('os.chmod')
+    @patch.dict(os.environ, {
+        'WORKER_DATASET_ROOT': '/assignment_datasets',
+        'HOST_DATASET_ROOT': '/mnt/datasets'
+    })
     def test_directory_mount_filename_logic(self, mock_chmod, mock_exists, mock_copy):
         """
         Verify that when mount_path ends in a slash, the dataset.name is used for the filename,

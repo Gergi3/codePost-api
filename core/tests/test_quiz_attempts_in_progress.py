@@ -61,3 +61,15 @@ def test_per_attempt_shows_last_save(course):
     assert f'attempt {active.id}: started' in out and 'deadline untimed, last save 0 min ago' in out
     assert f'attempt {idle.id}:' in out and 'last save never' in out
     assert _run('--quiz', '999999') == 'No in-progress attempts for quiz 999999.\n'
+
+
+def test_json_output_for_deploy_scripts(course):
+    import json
+    quiz = _quiz(course, title='Timed')
+    attempt = QuizAttempt.objects.create(quiz=quiz, student=course.students.first(),
+                                         deadline=timezone.now() + timedelta(minutes=30))
+    [row] = json.loads(_run('--json'))
+    assert row['quiz_id'] == quiz.id and row['in_progress'] == 1 and row['running_clock'] is True
+    [a] = json.loads(_run('--quiz', str(quiz.id), '--json'))
+    assert a['attempt_id'] == attempt.id and a['last_save'] is None
+    assert json.loads(_run('--quiz', str(quiz.id + 1), '--json')) == []

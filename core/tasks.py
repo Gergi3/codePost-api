@@ -521,6 +521,10 @@ def _update_suggestion_job(job_id: int | None, **fields):
 # quoted back — recovers most malformed or unusable outputs without anyone regenerating
 # by hand.
 _GENERATION_ATTEMPTS = 2
+# How much of a rejected model output is kept (QuizSuggestionJob.resultData.raw_output,
+# GeneratedQuestionSet.generationMetadata.raw_output) so a developer can see what the
+# model actually returned.
+_RAW_OUTPUT_KEEP = 20_000
 
 
 @shared_task
@@ -549,7 +553,11 @@ def generate_quiz_question_suggestions(
     from asgiref.sync import async_to_sync
     from core.models import Assignment, Question, SuggestedQuizQuestion, User
 
-    _update_suggestion_job(job_id, status='running')
+    # The request parameters ride on the job so a failed run can be retried from the
+    # admin (QuizSuggestionJobAdmin.retry_generation) without the original client.
+    request_params = {'num_questions': num_questions, 'question_types': question_types,
+                      'instructions': instructions}
+    _update_suggestion_job(job_id, status='running', resultData={'request': request_params})
 
     user = User.objects.filter(id=requested_by_id).first()
     assignment = Assignment.objects.filter(id=assignment_id).select_related(
@@ -620,7 +628,10 @@ def generate_quiz_question_suggestions(
                 service.record_usage(result, user=user, request_type='quiz_generation')
     if questions is None:
         service.record_usage(result, user=user, request_type='quiz_generation')
+        # Keep the last rejected output on the job so it can be inspected in the admin.
         _update_suggestion_job(job_id, status='failed',
+                               resultData={'request': request_params,
+                                           'raw_output': result.text[:_RAW_OUTPUT_KEEP]},
                                errorMessage='The model returned output that could not be parsed as questions '
                                             f'(after {_GENERATION_ATTEMPTS} attempts). Try again — repeated '
                                             'failures usually mean the configured model is unsuitable for '
@@ -850,11 +861,6 @@ def _claim_generation_sets(quiz, students, submission, force, batch):
                                         'errorMessage', 'approvedBy', 'approvedAt', 'modified'])
             claimed_ids.append(gen_set.id)
     return claimed_ids
-
-
-# How much of a rejected model output is kept on the set (generationMetadata.raw_output)
-# so a developer can see what the model actually returned.
-_RAW_OUTPUT_KEEP = 20_000
 
 
 def _usable_question_rows(text, section, env_language, quiz):
