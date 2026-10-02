@@ -993,6 +993,12 @@ class TestAISuggestions:
         assert poll.data['status'] == 'failed'
         assert 'parsed' in poll.data['errorMessage']
         assert 'after 2 attempts' in poll.data['errorMessage']
+        # The rejected output and the request parameters stay on the job for the admin
+        # (raw output rendered read-only; the retry action replays the request).
+        from core.models import QuizSuggestionJob
+        job = QuizSuggestionJob.objects.get(pk=resp.data['id'])
+        assert job.resultData['raw_output'] == 'this is not json'
+        assert job.resultData['request'] == {'num_questions': 5, 'question_types': None, 'instructions': ''}
 
     def test_parse_failure_is_retried_with_feedback(self, api_client, quiz_setup, monkeypatch):
         """Unparseable output is re-asked once, quoting the parse problem back; a usable

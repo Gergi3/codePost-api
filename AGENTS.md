@@ -44,6 +44,12 @@ pytest autograder/tests/    # autograder tests only
 # Re-sync the in-app user docs (markdown) from codePost-ui into docs/user/
 # — they back the agent's codepost_search_docs tool
 ./scripts/sync_user_docs.sh
+
+# Diagnostics (all read-only; add --json for scripts)
+python manage.py doctor [--ai]                  # dependency checks: DB, migrations, broker, workers, beat, docker, secrets, OAuth (exit 1 on failure)
+python manage.py diagnose submission|assignment|quiz|course|user <id|email>   # one-screen state + autograder runs, AI calls, audit events, task results
+python manage.py ai_failures [--days N] [--course ID] [--raw JOB_ID]           # failed quiz-generation jobs/sets and errored provider calls
+python manage.py quiz_attempts_in_progress      # deploy safety: whose quiz clock is running
 ```
 
 ## Project Conventions
