@@ -119,12 +119,18 @@ class AssignmentDataSetCreateSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
 
     def validate_file(self, value):
-        """Validate file size"""
+        """Validate file size, then that the content matches the extension (a renamed CSV
+        or an HTML error page saved as .zip would otherwise only fail in a student's code)."""
         if value.size > MAX_DATASET_SIZE:
             raise serializers.ValidationError(
                 f"File size exceeds maximum allowed size of {MAX_DATASET_SIZE / (1024**3):.1f} GB"
             )
-        
+
+        from core.services.dataset_validation import dataset_file_problem
+        problem = dataset_file_problem(value.name or '', value, value.size)
+        if problem:
+            raise serializers.ValidationError(problem)
+
         return value
 
 
@@ -143,6 +149,7 @@ class AssignmentDataSetUpdateSerializer(serializers.ModelSerializer):
             'description',
             'mountPath',
             'isActive',
+            'hidden',
             'isTestResource',
             'isStudentVariant',
             'autogradeAllVariants',

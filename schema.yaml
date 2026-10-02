@@ -17239,6 +17239,9 @@ components:
           type: string
         isActive:
           type: boolean
+        hidden:
+          type: boolean
+          description: If True, this dataset will be hidden from students.
         isTestResource:
           type: boolean
         isStudentVariant:
@@ -20905,6 +20908,9 @@ components:
           type: string
         isActive:
           type: boolean
+        hidden:
+          type: boolean
+          description: If True, this dataset will be hidden from students.
         isTestResource:
           type: boolean
         isStudentVariant:

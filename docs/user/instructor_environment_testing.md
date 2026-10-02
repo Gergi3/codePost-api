@@ -58,19 +58,23 @@ Tick **Run pre-script** before starting a shell session. The shell will run the 
 > [!TIP]
 > Use the pre-script toggle when a student reports a compile-time error that doesn't reproduce in a fresh container — the pre-script may be silently failing, and running it in the shell exposes the output.
 
+### Datasets in the shell
+
+The **Datasets to mount** picker chooses which of the assignment's datasets are mounted in the session. It defaults to what a normal run gets — the shared datasets — so a per-student variant pool is not mounted whole (every variant shares one path, so they would collide). Add a specific variant or a test resource to the selection to inspect it at its path, or clear the selection to start with nothing mounted.
+
 ## Data Sets
 
-Data Sets are large or static files (CSVs, model weights, reference data) that need to be present when student code or autograder tests run. Unless hidden, they are also **delivered to students** — bundled into the assignment download zip (see [What students receive](#what-students-receive) below).
+Data Sets are large or static files (CSVs, model weights, reference data) that students need. Each dataset can reach students in two independent ways: **included in the assignment download** (the zip students fetch from the assignment page) and/or **mounted when code runs** (inside the autograder or JupyterHub container). Most datasets do both.
 
-### Adding a dataset
+### Adding datasets
 
 1. Open the assignment's **Settings > Resources > Datasets** panel.
-2. Click **Upload Dataset**.
-3. Provide:
-   - **Name** — unique within the assignment (e.g. `mnist`, `housing.csv`).
-   - **File** — the data to upload (up to 1 GB).
-   - **Mount path** _(optional)_ — where the file appears in the execution environment.
-   - **Active** — whether to mount during code execution. Toggle off to retire a dataset without deleting it. Active controls **execution mounting only** — a non-hidden dataset is included in the student download either way.
+2. Click **Upload Datasets**, or drag files straight onto the panel. Drop several files at once — each file becomes one dataset.
+3. For each file, the **dataset name** and **mount path** are prefilled from the filename (`shared/<file name>`, shown as `~/shared/...`, the location student code should use). Edit either before uploading; end a mount path with `/` to mount into a folder. Names must be unique within the assignment, and files can be up to 1 GB each. Archives and binary formats (`.zip`, `.gz`, `.xlsx`, `.parquet`, `.npy`, `.pdf`, images, and similar) are checked against their extension at upload, so a renamed CSV or a saved error page posing as a `.zip` is rejected with a clear message instead of failing later in a student's code. Plain-text files are not inspected.
+4. Choose **how students get this data** (both on by default):
+   - **Include in students' assignment download** — the file lands in the `data/` folder of their zip.
+   - **Mount when code runs** — the file is available read-only at its mount path during execution. Turn this off later from the **Mounted** switch in the table to retire a dataset without deleting it; it has no effect on the download.
+5. Choose the **distribution**: **everyone gets the same file(s)**, or **per-student variant pool** where each uploaded file is one variant (see [Per-student dataset variants](#per-student-dataset-variants)).
 
 ### What students receive
 
@@ -80,17 +84,26 @@ The student's **Download** button on an assignment returns a zip containing the 
 - Staff downloads include the shared datasets but no variants; download a specific variant from the Datasets panel instead.
 - External environments that mount datasets themselves (e.g. JupyterHub) can call the download API with `?includeDatasets=false` to get starter files only; this also skips the variant auto-assignment side effect.
 
-### Hidden datasets
+### Keeping a dataset out of the student download
 
-A **hidden** dataset is never shown to students: it doesn't appear in their dataset listing and is not included in their assignment download. While **Active**, it is still mounted during code execution — use this for data student code needs at runtime but shouldn't take home.
-
-Hidden is set at upload time and can't be toggled afterwards. The Datasets panel always uploads student-visible datasets; the **Upload Dataset** modal on the Environment & Tests page has a **Mark as Hidden** checkbox (on by default). Hidden datasets appear in the Datasets panel with a **Hidden** tag.
+Untick **Include in students' assignment download** to keep a dataset off the student's zip and out of their dataset listing while still mounting it when code runs — for data student code needs at runtime but shouldn't take home. You can change this later from **Edit**. Such datasets show a **Not in student download** tag in the Datasets panel. Test resources (below) are always kept out of the download.
 
 ### Mount paths
 
-- Leave **Mount path** blank to auto-mount at `~/shared/<name>`.
-- A **relative path** (e.g. `mnist/` or `housing.csv`) mounts under `/shared/`.
-- An **absolute path** (e.g. `/etc/config.json`) mounts at that exact location.
+Every codePost environment has **one shared folder** that student code can reach by several names — they are all the same place:
+
+| Spelling | Where it is |
+|---|---|
+| `~/shared/housing.csv` | the `shared` folder in the home directory — **use this in notebooks**, it works in the autograder and on JupyterHub alike |
+| `/shared/housing.csv` | the folder's real location in the container |
+| `./shared/housing.csv` | the same folder seen from the working directory |
+| `/srv/shared/housing.csv` | the JupyterHub-style location; linked to the shared folder in environments built after this update |
+
+- Leave **Mount path** blank to mount at `~/shared/<name>`. The relative spellings `~/shared/<name>`, `./shared/<name>` and `shared/<name>` are stored as `shared/<name>` and shown as `~/shared/<name>`.
+- A **relative path** (e.g. `mnist/` or `housing.csv`) goes inside the shared folder.
+- **`./housing.csv`** mounts in the **working directory** (`/work`), right next to the student's code, so `open("housing.csv")` needs no path at all. **`~/housing.csv`** mounts in the home directory itself (`/home/codepost`).
+- An **absolute path** (e.g. `/srv/shared/housing.csv` or `/etc/config.json`) is never rewritten: it mounts at exactly that location and is shown as typed.
+- End any path with `/` to mount into that folder under the dataset's name.
 
 > [!IMPORTANT]
 > A dataset mounted as a single file (e.g. `housing.csv`) and one mounted as a directory at the same parent path can conflict. Keep dataset roots distinct.
@@ -105,16 +118,16 @@ When a category has resources, its test runs mount *only* those resources — th
 
 Sometimes you want **each student to work with different data** — so their results are unique and copied solutions are easy to spot. codePost supports this with a **variant pool**: a set of datasets that all mount at the **same path**, one assigned to each student.
 
-- Mark a dataset **Per-student variant** to add it to the pool. Every variant in an assignment shares one mount path automatically, so student code reads the data by a fixed path regardless of which variant they got.
+- Drop the variant files together and choose **Per-student variant pool** in the upload dialog — each file becomes one variant. Every variant in an assignment shares one mount path (set once for the pool), so student code reads the data by a fixed path regardless of which variant they got.
 - Each student is **assigned exactly one** variant the first time they access the assignment, balanced evenly across the pool. Group submissions share a single variant.
 - Manage assignments on the **Student assignments** tab (next to Data Sets) — see who has which variant, and override any student.
 
 > [!TIP]
-> **Split one file into variants.** Instead of uploading many files, upload one master CSV and use **Split into variants** on it. codePost divides it into non-overlapping row-chunks (you choose **rows per chunk**), one variant each. The chunk count is driven by rows-per-chunk, **not** current enrollment, so the pool stays stable as students add or drop the course.
+> **Split one file into variants.** Instead of uploading many files, upload one master CSV and use **Split into variants** on it. codePost divides it into non-overlapping row-chunks (you choose **rows per chunk**), one variant each. The chunk count is driven by rows-per-chunk, **not** current enrollment, so the pool stays stable as students add or drop the course. The master file is kept for you but is no longer mounted or included in the student download.
 
 ### Variant robustness (autograder)
 
-On a variant pool, turn on **Autograder checks every variant** to have the autograder rerun each finalized submission against *every other* variant — not just the student's own. If code is hardcoded to one dataset's numbers, it shows up as a failure. Results appear in the **Variant Check** panel on the grading screen. This is opt-in because it runs the autograder once per extra variant.
+On a variant pool, turn on **Autograder also checks other variants** to have the autograder rerun each finalized submission against *every other* variant — not just the student's own. If code is hardcoded to one dataset's numbers, it shows up as a failure. Results appear in the **Variant Check** panel on the grading screen. This is opt-in because it runs the autograder once per extra variant.
 
 ## Custom Docker environment
 

@@ -30,6 +30,7 @@ from docker import DockerClient
 
 from core.models import User
 from core.services.dataset_assignment import get_or_assign_for_submission
+from core.services.mount_paths import container_mount_path
 
 # pkg_resources shim is installed via core.compat for setuptools >= 82 compatibility
 
@@ -388,6 +389,7 @@ class Executor(abc.ABC):
         labels: Optional[Dict[str, str]] = None,
         tmpfs_size: str = "size=512m,mode=1777",
         run_pre_script: bool = False,
+        dataset_ids: Optional[list[int]] = None,
     ):
         """
         Start a shell session container.
@@ -403,6 +405,7 @@ class Executor(abc.ABC):
             labels=labels,
             tmpfs_size=tmpfs_size,
             run_pre_script=run_pre_script,
+            dataset_ids=dataset_ids,
         )
     
     @classmethod
@@ -646,24 +649,12 @@ class Executor(abc.ABC):
                     mount_path = custom_mount_path
                 else:
                     mount_path = dataset.mount_path or f'shared/{dataset.name}'
-                
-                # If mount path ends with /, assume it's a directory and append filename
-                filename = os.path.basename(host_file_path)
-                if mount_path.endswith('/'):
-                    # Use the dataset name as the filename if available, otherwise fallback to the disk filename
-                    final_filename = dataset.name if dataset.name else filename
-                    mount_path = os.path.join(mount_path, final_filename)
-                
-                if mount_path.startswith('/'):
-                    # Absolute path
-                    container_path = mount_path
-                else:
-                    # Relative path - ensure it goes to /shared
-                    if mount_path.startswith('shared/'):
-                         mount_path = mount_path[7:]
-                    container_path = os.path.join('/shared', mount_path)
 
-                container_path = os.path.normpath(container_path)
+                # One rule for every spelling (shared/x, ~/shared/x, /srv/shared/x, ./x, ~/x,
+                # absolute) — see core.services.mount_paths. A trailing slash means a folder:
+                # the dataset name is appended (falling back to the on-disk filename).
+                filename = os.path.basename(host_file_path)
+                container_path = container_mount_path(mount_path, dataset.name if dataset.name else filename)
 
                 # Translate path for Docker-in-Docker (Staging Dir Translation)
                 # Only needed if we are NOT using direct mount (which is already translated)

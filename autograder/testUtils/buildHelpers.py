@@ -67,6 +67,7 @@ def createDockerFile(
         "RUN mkdir -p /shared && chmod 555 /shared\n"
         "RUN ln -s /shared /home/codepost/shared\n"
         "RUN ln -s /shared /work/shared\n"
+        "RUN mkdir -p /srv && ln -s /shared /srv/shared\n"
         "RUN chown -R codepost:codepost /work\n"
     ).format(userAddCmd, cache_mkdir_cmd)
 

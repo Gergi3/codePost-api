@@ -90,6 +90,7 @@ def _start_container(
     timeout_seconds: int,
     user_id: int | None = None,
     run_pre_script: bool = False,
+    dataset_ids: list[int] | None = None,
 ):
     from autograder.services.executors.base import Executor
 
@@ -101,6 +102,7 @@ def _start_container(
         timeout_seconds=timeout_seconds,
         labels=labels,
         run_pre_script=run_pre_script,
+        dataset_ids=dataset_ids,
     )
 
 
@@ -111,6 +113,7 @@ def _start_session_sync(
     timeout_seconds: int,
     user_id: int | None = None,
     run_pre_script: bool = False,
+    dataset_ids: list[int] | None = None,
 ):
     from core.models import Environment
 
@@ -122,6 +125,7 @@ def _start_session_sync(
         timeout_seconds,
         user_id=user_id,
         run_pre_script=run_pre_script,
+        dataset_ids=dataset_ids,
     )
     # Sync wrapper to fetch environment and start container.
     return env.image_name, volumes, staging_dir, container, sock
@@ -197,6 +201,8 @@ class WorkerShellRelay:
         include_datasets = bool(payload.get("includeDatasets", True))
         include_assignment_files = bool(payload.get("includeAssignmentFiles", True))
         run_pre_script = bool(payload.get("runPreScript", False))
+        raw_ids = payload.get("datasetIds")
+        dataset_ids = [int(i) for i in raw_ids if str(i).isdigit()] if isinstance(raw_ids, list) else None
         timeout_seconds = _normalize_timeout(payload.get("timeoutSeconds"))
         if timeout_seconds > self.MAX_SESSION_SECONDS:
             timeout_seconds = self.MAX_SESSION_SECONDS
@@ -209,6 +215,7 @@ class WorkerShellRelay:
                 timeout_seconds,
                 user_id,
                 run_pre_script,
+                dataset_ids,
             )
         except Exception as e:
             logger.exception("Worker shell start failed")
