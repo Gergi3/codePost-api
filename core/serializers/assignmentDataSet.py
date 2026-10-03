@@ -1,9 +1,22 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+import copy
+
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
 from core.constants import MAX_DATASET_SIZE
 from core.models import AssignmentDataSet
+
+
+def _shallow_copy(data):
+    """Mutable copy of request data that does NOT deep-copy uploaded files.
+
+    ``QueryDict.copy()`` is a deepcopy, and an upload bigger than
+    FILE_UPLOAD_MAX_MEMORY_SIZE (2.5 MB) arrives as a TemporaryUploadedFile wrapping an
+    open temp file, which can't be deep-copied ("cannot pickle 'BufferedRandom'") — every
+    dataset over 2.5 MB 500'd. ``copy.copy`` uses QueryDict.__copy__, which is shallow.
+    """
+    return copy.copy(data)
 
 
 class AssignmentDataSetSerializer(serializers.ModelSerializer):
@@ -43,7 +56,7 @@ class AssignmentDataSetSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created', 'modified', 'fileUrl', 'fileSize', 'fileName', 'hidden']
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:
@@ -107,7 +120,7 @@ class AssignmentDataSetCreateSerializer(serializers.ModelSerializer):
         ]
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:
@@ -156,7 +169,7 @@ class AssignmentDataSetUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:

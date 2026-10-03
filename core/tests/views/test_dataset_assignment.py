@@ -1079,3 +1079,40 @@ class TestDatasetUploadValidation:
         assert resp.status_code == status.HTTP_201_CREATED, resp.data
         resp = self._post(api_client, variant_setup, 'model.bin', b'\x00\x01\x02')
         assert resp.status_code == status.HTTP_201_CREATED, resp.data
+
+
+# --------------------------------------------------------------------------- #
+# Upload: files over FILE_UPLOAD_MAX_MEMORY_SIZE arrive as TemporaryUploadedFile
+# --------------------------------------------------------------------------- #
+
+class TestDatasetUpload:
+    def test_upload_larger_than_memory_threshold(self, api_client, variant_setup, settings, tmp_path):
+        """A >2.5 MB upload is spooled to a temp file; the serializer used to deep-copy
+        the request QueryDict (and that open file with it) and 500'd."""
+        import io
+        import os
+        import zipfile
+        settings.MEDIA_ROOT = str(tmp_path)
+        settings.FILE_UPLOAD_MAX_MEMORY_SIZE = 1024
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('names.txt', os.urandom(64 * 1024))
+
+        api_client.force_authenticate(user=variant_setup['admin'])
+        resp = api_client.post('/assignmentDataSets/', {
+            'assignment': variant_setup['assignment'].id,
+            'name': 'namesbystate.zip',
+            'mount_path': 'shared/namesbystate.zip',
+            'is_active': 'true',
+            'hidden': 'true',
+            'is_student_variant': 'false',
+            'autogradeAllVariants': 'false',
+            'file': SimpleUploadedFile('namesbystate.zip', buf.getvalue()),
+        }, format='multipart')
+
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+        dataset = AssignmentDataSet.objects.get(id=resp.data['id'])
+        assert dataset.mount_path == 'shared/namesbystate.zip'
+        assert dataset.is_active and dataset.hidden
+        assert zipfile.is_zipfile(dataset.file.path)
