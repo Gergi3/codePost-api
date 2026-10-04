@@ -2,8 +2,8 @@
 """Lenient parsing of JSON that a language model was asked to produce.
 
 Models break the "reply with a bare JSON array" contract in a handful of recurring
-ways — ```json fences, prose around the payload, an object wrapper, literal newlines
-or unescaped quotes inside strings (code in a description). The generation tasks
+ways — ```json fences, prose around the payload, an object wrapper, literal newlines,
+unescaped quotes or invalid backslash escapes inside strings (code in a description). The generation tasks
 parse through here so a run isn't failed over formatting; anything that still
 doesn't parse raises ``ValueError`` and the task records the raw output.
 """
@@ -14,7 +14,8 @@ import re
 def json_candidates(text: str):
     """Yield the substrings of a model output that may hold its JSON payload, most
     literal first: the whole text, the body of a wrapping ```json fence, any fenced
-    block, and finally the outermost bracketed span (prose around the JSON)."""
+    block, the outermost bracketed span (prose around the JSON), and finally the first
+    complete JSON value (the payload repeated or followed by another one)."""
     cleaned = (text or '').strip()
     yield cleaned
     if cleaned.startswith('```'):
@@ -29,6 +30,14 @@ def json_candidates(text: str):
     end = max(cleaned.rfind(']'), cleaned.rfind('}'))
     if starts and end > min(starts):
         yield cleaned[min(starts):end + 1]
+    if starts:
+        # The payload followed by more JSON (a model that printed the array twice):
+        # the outermost span above fails, so take the first complete value.
+        try:
+            _, stop = json.JSONDecoder(strict=False).raw_decode(cleaned, min(starts))
+        except json.JSONDecodeError:
+            return
+        yield cleaned[min(starts):stop]
 
 
 def escape_stray_quotes(text: str) -> str:
@@ -83,9 +92,22 @@ def escape_stray_quotes(text: str) -> str:
     return ''.join(out)
 
 
+def escape_invalid_backslashes(text: str) -> str:
+    """Double a backslash that doesn't start a legal JSON escape — a regex such as
+    ``\\s*`` pasted into a string unescaped. Legal escapes (``\\\\``, ``\\n``, ``\\"``, ...)
+    are consumed as pairs so their second character is never re-examined."""
+    return re.sub(r'\\(.)', lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else '\\\\' + m.group(1),
+                  text, flags=re.DOTALL)
+
+
 def loads_lenient(candidate: str):
     """``json.loads`` that tolerates literal control characters inside strings and,
-    failing that, unescaped double quotes inside strings."""
+    failing that, invalid backslash escapes and unescaped double quotes inside strings."""
+    try:
+        return json.loads(candidate, strict=False)
+    except json.JSONDecodeError:
+        pass
+    candidate = escape_invalid_backslashes(candidate)
     try:
         return json.loads(candidate, strict=False)
     except json.JSONDecodeError:
@@ -114,3 +136,49 @@ def parse_json_questions(text: str) -> list:
         data = data['questions'] if isinstance(data.get('questions'), list) else (
             lists[0] if len(lists) == 1 else [])
     return data if isinstance(data, list) else []
+
+
+def quiz_questions_schema() -> dict:
+    """JSON Schema for a quiz-generation reply: ``{"questions": [...]}``.
+
+    Handed to the provider's structured-output option so malformed JSON never reaches
+    the parser (which unwraps the ``questions`` key). The root is an object because
+    OpenAI's strict mode refuses an array root. Optional fields are nullable rather
+    than omittable: strict mode requires every property to be listed in ``required``,
+    and every provider accepts a nullable type."""
+    from core.models import QUESTION_TYPE_CHOICES
+
+    def nullable(t):
+        return {'type': [t, 'null']}
+
+    choice = {
+        'type': 'object',
+        'properties': {
+            'text': {'type': 'string'},
+            'is_correct': {'type': 'boolean'},
+            'feedback': nullable('string'),
+        },
+        'required': ['text', 'is_correct', 'feedback'],
+        'additionalProperties': False,
+    }
+    question = {
+        'type': 'object',
+        'properties': {
+            'type': {'type': 'string', 'enum': [key for key, _ in QUESTION_TYPE_CHOICES]},
+            'text': {'type': 'string'},
+            'description': nullable('string'),
+            'points': {'type': 'integer'},
+            'choices': {'type': 'array', 'items': choice},
+            'starter_code': nullable('string'),
+            'reference_solution': nullable('string'),
+        },
+        'required': ['type', 'text', 'description', 'points', 'choices',
+                     'starter_code', 'reference_solution'],
+        'additionalProperties': False,
+    }
+    return {
+        'type': 'object',
+        'properties': {'questions': {'type': 'array', 'items': question}},
+        'required': ['questions'],
+        'additionalProperties': False,
+    }

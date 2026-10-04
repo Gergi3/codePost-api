@@ -1,5 +1,10 @@
 // Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
 // Node.js Execution Template
+
+// The executor stages this script as /work/.codepost_runner.js; unlink it first
+// thing (Node has already read the whole file). Guarded by name for local/test runs.
+try { if (require("path").basename(__filename).startsWith(".codepost_runner")) require("fs").unlinkSync(__filename); } catch (e) {}
+
 const fs = require("fs");
 const { execSync } = require("child_process");
 

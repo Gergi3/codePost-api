@@ -1076,6 +1076,64 @@ class CourseViewSet(SuperUserListProtectedViewSet):
             meta={"tool": action_row.tool, "planHash": action_row.plan_hash,
                   "actionId": action_row.pk, "origin": "dashboard"})
 
+    @extend_schema(
+        parameters=[OpenApiParameter(
+            name="q", type=OpenApiTypes.STR, location=OpenApiParameter.QUERY,
+            required=True,
+            description="An agent alias (student-3f9a1c2d40), a student's email, "
+                        "or a bare NetID/username.")],
+        responses=inline_serializer(name="AgentAliasLookupResponse", fields={
+            "matches": serializers.ListField(child=inline_serializer(
+                name="AgentAliasMatch", fields={
+                    "alias": serializers.CharField(),
+                    "email": serializers.EmailField(),
+                    "username": serializers.CharField(),
+                    "active": serializers.BooleanField(),
+                }))}))
+    @action(detail=True, methods=["GET"], url_path="agentAliases")
+    def agentAliases(self, request, pk=None):
+        """Resolve the pseudonymous alias an MCP agent uses for a student back
+        to the student (or the reverse).
+
+        Course-scoped credentials are refused outright: the agent's own key
+        must never be able to de-anonymize its own output. Only a human
+        course admin, signed in normally, may look aliases up.
+        """
+        from core.agent.privacy import StudentAliasMap
+
+        course = self.get_object()
+        if get_course_scope_id(request) is not None:
+            return Response(
+                {"detail": "Alias lookup is only available to a signed-in course "
+                           "admin, never to a course-scoped credential."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not (request.user.is_superuser or isCourseAdmin(request.user, course)):
+            return returnForbidden()
+
+        q = (request.query_params.get("q") or "").strip().lower()
+        if not q:
+            return Response({"detail": "Pass ?q=<alias, email or NetID>."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        aliases = StudentAliasMap.for_course(course)
+        if q in aliases.by_alias:
+            emails = aliases.by_alias[q]
+        elif q in aliases.by_email:
+            emails = aliases.by_alias[aliases.by_email[q]]
+        elif q in aliases.by_token:
+            emails = [e for e in aliases.by_alias[aliases.by_token[q]]
+                      if e.lower().split("@", 1)[0] == q
+                      or aliases.username_of[e.lower()].lower() == q]
+        else:
+            emails = []
+        active = {e.lower() for e in course.students.values_list("email", flat=True)}
+        return Response({"matches": [
+            {"alias": aliases.by_email[e.lower()], "email": e,
+             "username": aliases.username_of[e.lower()],
+             "active": e.lower() in active}
+            for e in emails]})
+
     @extend_schema(responses=QuestionBankSerializer(many=True))
     @action(detail=True, methods=["GET"], url_path="questionBanks")
     def questionBanks(self, request, pk=None):

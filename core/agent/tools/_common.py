@@ -118,16 +118,42 @@ def load_roster(ctx) -> dict:
     return ctx._roster
 
 
-def resolve_student(ctx, email: str) -> str:
-    """Validate an email against the roster, with fuzzy candidates on a miss."""
+def alias_map(ctx):
+    """The course's student alias map, built once per call."""
+    if ctx._aliases is None:
+        from core.agent.privacy import StudentAliasMap
+        ctx._aliases = StudentAliasMap.for_course(ctx.course)
+    return ctx._aliases
+
+
+def unalias(ctx, ident: str) -> str:
+    """alias → email. Anything else (a typed email, a brand-new address, a
+    grader) passes through unchanged; an unknown alias is an error."""
+    from core.agent import privacy
+
+    if not privacy.is_alias(ident):
+        return ident
+    email = alias_map(ctx).unalias(ident)
+    if email is None:
+        raise errors.unknown_student(ident, [])
+    return email
+
+
+def resolve_student(ctx, ident: str) -> str:
+    """Alias or email → roster email, with fuzzy candidates on a miss.
+
+    The candidates are emails here; the outbound scrub turns them into
+    aliases before the model sees them."""
+    email = unalias(ctx, ident)
     roster = load_roster(ctx)
     students = [e for e in (roster.get('students') or [])]
-    if email in students:
-        return email
+    for e in students:
+        if e.lower() == email.lower():
+            return e
 
     needle = email.split('@')[0].lower()
     candidates = [e for e in students if needle in e.lower()][:5]
-    raise errors.unknown_student(email, candidates)
+    raise errors.unknown_student(ident, candidates)
 
 
 def camelize_roster(roster: dict) -> dict:
@@ -144,4 +170,7 @@ def camelize_roster(roster: dict) -> dict:
         'inactive_courseAdmins': 'inactiveCourseAdmins',
         'not_activated': 'notActivated',
     }
-    return {renames.get(k, k): v for k, v in roster.items()}
+    # ``not_activated`` is a SerializerMethodField that returns a map object;
+    # in-process dispatch never JSON-renders it, so materialise it here.
+    return {renames.get(k, k): (list(v) if isinstance(v, map) else v)
+            for k, v in roster.items()}

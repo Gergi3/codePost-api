@@ -88,7 +88,12 @@ gain or lose, and it must call again explicitly to apply.
 - Revoking the API key (or deactivating it) cuts the agent off immediately. OAuth
   connections are revoked from your AI assistant's connector settings, and their tokens
   expire on their own within an hour of revocation.
-- The agent sees student emails and grades if you give it a `read`-or-above key — treat
+- The agent never sees student email addresses. Students appear as stable, course-specific
+  aliases such as `student-3f9a1c2d40` (a student has a different alias in each course);
+  graders and admins still appear by email. You can pass an alias back to the agent, and
+  resolve one to a real student under **Course Settings > Student Aliases** — that page is
+  only available to a signed-in course admin, never to the agent's own key.
+- The agent can still see grades and submission metadata with a `read`-or-above key — treat
   the key like you would treat your own login.
 - Agent traffic is rate-limited per course, so a runaway agent cannot affect the rest of
   codePost.

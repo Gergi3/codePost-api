@@ -68,7 +68,7 @@ def _mock_ai(monkeypatch, json_text=QUESTIONS_JSON, success=True, side_effect=No
     from asgiref.sync import sync_to_async
     from core.services.ai_service import GenerationResult
 
-    async def mock_generate(self, section, submission, demo_files=None):
+    async def mock_generate(self, section, submission, demo_files=None, prior_error=''):
         if side_effect is not None:
             await sync_to_async(side_effect)(section, submission)
         if not success:
@@ -81,15 +81,18 @@ def _mock_ai(monkeypatch, json_text=QUESTIONS_JSON, success=True, side_effect=No
     _enable_ai(monkeypatch)
 
 
-def _mock_ai_sequence(monkeypatch, texts):
+def _mock_ai_sequence(monkeypatch, texts, feedback=None):
     """Like ``_mock_ai`` but answers each call with the next entry of ``texts`` (``None``
-    = provider failure). Returns the list of calls made, for asserting retry counts."""
+    = provider failure). Returns the list of section ids called, for asserting retry
+    counts; ``feedback`` (if given) collects the ``prior_error`` each call carried."""
     from core.services.ai_service import GenerationResult
     calls = []
 
-    async def mock_generate(self, section, submission, demo_files=None):
+    async def mock_generate(self, section, submission, demo_files=None, prior_error=''):
         text = texts[len(calls)]
         calls.append(section.id)
+        if feedback is not None:
+            feedback.append(prior_error)
         if text is None:
             return GenerationResult(text='', success=False, error='model unavailable')
         return GenerationResult(text=text, success=True, input_tokens=10, output_tokens=20,
@@ -374,7 +377,8 @@ class TestParseJsonQuestions:
         f'Here are the questions:\n\n```json\n{QUESTIONS_JSON}\n```\n\nLet me know if you need more.',
         f'Here are the questions: {QUESTIONS_JSON} Let me know.',
         json.dumps({'questions': json.loads(QUESTIONS_JSON)}),
-    ], ids=['bare', 'fenced', 'prose+fenced', 'prose+inline', 'object-wrapper'])
+        f'{QUESTIONS_JSON}\n{QUESTIONS_JSON}',
+    ], ids=['bare', 'fenced', 'prose+fenced', 'prose+inline', 'object-wrapper', 'repeated'])
     def test_tolerated_shapes(self, text):
         from core.services.ai_json import parse_json_questions
         assert parse_json_questions(text) == json.loads(QUESTIONS_JSON)
@@ -390,6 +394,17 @@ class TestParseJsonQuestions:
         [q] = parse_json_questions(text)
         assert 'baby_names["Year"] == 2000' in q['description']
         assert q['reference_solution'] == 'pa = baby_names[(baby_names["State"] == "PA")]'
+
+    def test_invalid_backslash_escapes_inside_strings(self):
+        """Real failure seen in production: a regex (``\\s*``) left unescaped inside a
+        string; the repair keeps it and leaves legal escapes (``\\\\w``, ``\\n``) alone."""
+        from core.services.ai_json import parse_json_questions
+        text = ('[{"type": "code", "text": "Fix the regex.",\n'
+                '  "description": "```python\\npattern = re.compile(r\'([a-zA-Z]+)\\s*[:=]\\s*([^\\s|]+)\')\\n```",\n'
+                '  "reference_solution": "# [a-zA-Z0-9] or \\\\w\\npattern = re.compile(r\'\\s*\')"}]')
+        [q] = parse_json_questions(text)
+        assert q['description'] == "```python\npattern = re.compile(r'([a-zA-Z]+)\\s*[:=]\\s*([^\\s|]+)')\n```"
+        assert q['reference_solution'] == "# [a-zA-Z0-9] or \\w\npattern = re.compile(r'\\s*')"
 
     def test_literal_newline_inside_string(self):
         from core.services.ai_json import parse_json_questions
@@ -546,11 +561,16 @@ class TestGenerationTask:
     def test_unparseable_output_is_retried(self, gen_setup, monkeypatch):
         """A malformed model output is re-asked before the set fails; the successful
         retry leaves no raw_output behind."""
-        calls = _mock_ai_sequence(monkeypatch, ['Sorry, I cannot do that.', QUESTIONS_JSON])
+        feedback = []
+        calls = _mock_ai_sequence(monkeypatch, ['Sorry, I cannot do that.', QUESTIONS_JSON],
+                                  feedback=feedback)
         _run_task(gen_setup['submission'])
         gen_set = gen_setup['quiz'].generatedSets.get(student=gen_setup['students'][0])
         assert gen_set.status == 'ready'
         assert len(calls) == 2
+        # The re-ask tells the model what was wrong with its first reply.
+        assert feedback[0] == ''
+        assert feedback[1].startswith('Could not parse the model output as questions')
         assert gen_set.questions.count() == 2
         assert gen_set.errorMessage == ''
         assert 'raw_output' not in gen_set.generationMetadata
@@ -1453,7 +1473,7 @@ class TestPreviewGeneratedSection:
         """Like _mock_ai, but records (section, submission, demo_files) per call."""
         from core.services.ai_service import GenerationResult
 
-        async def mock_generate(self, section, submission, demo_files=None):
+        async def mock_generate(self, section, submission, demo_files=None, prior_error=''):
             if calls is not None:
                 calls.append((section, submission, demo_files))
             return GenerationResult(text=json_text, success=True, input_tokens=10,

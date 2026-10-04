@@ -894,7 +894,7 @@ def _mock_ai(monkeypatch, json_text):
     from core.services.ai_service import GenerationResult
 
     async def mock_generate(self, assignment=None, num_questions=5, question_types=None,
-                            source_question=None, instructions=''):
+                            source_question=None, instructions='', prior_error=''):
         return GenerationResult(text=json_text, success=True, input_tokens=10, output_tokens=20)
 
     monkeypatch.setattr('core.services.ai_service.AIService.generate_quiz_questions', mock_generate)
@@ -992,6 +992,37 @@ class TestAISuggestions:
         poll = api_client.get(f"/quizSuggestionJobs/{resp.data['id']}/")
         assert poll.data['status'] == 'failed'
         assert 'parsed' in poll.data['errorMessage']
+        assert 'after 2 attempts' in poll.data['errorMessage']
+        # The rejected output and the request parameters stay on the job for the admin
+        # (raw output rendered read-only; the retry action replays the request).
+        from core.models import QuizSuggestionJob
+        job = QuizSuggestionJob.objects.get(pk=resp.data['id'])
+        assert job.resultData['raw_output'] == 'this is not json'
+        assert job.resultData['request'] == {'num_questions': 5, 'question_types': None, 'instructions': ''}
+
+    def test_parse_failure_is_retried_with_feedback(self, api_client, quiz_setup, monkeypatch):
+        """Unparseable output is re-asked once, quoting the parse problem back; a usable
+        second reply completes the job."""
+        from core.services.ai_service import GenerationResult
+        texts = ['this is not json', '[{"type": "essay", "text": "Explain.", "points": 5}]']
+        feedback = []
+
+        async def mock_generate(self, assignment=None, num_questions=5, question_types=None,
+                                source_question=None, instructions='', prior_error=''):
+            feedback.append(prior_error)
+            return GenerationResult(text=texts[len(feedback) - 1], success=True,
+                                    input_tokens=10, output_tokens=20)
+        monkeypatch.setattr('core.services.ai_service.AIService.generate_quiz_questions', mock_generate)
+        _enable_ai(monkeypatch)
+        self._run_task_inline(monkeypatch)
+
+        api_client.force_authenticate(user=quiz_setup['admin'])
+        resp = api_client.post(
+            f"/assignments/{quiz_setup['assignment'].id}/generateQuizQuestions/", format='json')
+        poll = api_client.get(f"/quizSuggestionJobs/{resp.data['id']}/")
+        assert poll.data['status'] == 'completed'
+        assert feedback[0] == ''
+        assert feedback[1].startswith('it was not valid JSON')
 
     def test_job_records_empty_generation(self, api_client, quiz_setup, monkeypatch):
         """A run that yields zero usable questions fails the job instead of completing silently."""

@@ -3,6 +3,14 @@
 
 # To use this template replace the placeholder {cells_b64} with a base64-encoded JSON array of cells, And packages_to_install with a list of packages to install.
 
+# The executor stages this script as /work/.codepost_runner.R; remove it as the
+# first expression. Rscript opened --file= once at startup and reads through that
+# handle, so unlinking the path is safe. Guarded by name for local/test runs.
+local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(), value = TRUE))
+    if (length(f) == 1 && startsWith(basename(f), ".codepost_runner")) suppressWarnings(file.remove(f))
+})
+
 MAX_CELLS <- 500  # Maximum number of cells allowed to prevent abuse
 
 packages_to_install <- list()

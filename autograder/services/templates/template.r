@@ -1,5 +1,14 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
 # CodePost R Plot Capture Wrapper
+
+# The executor stages this script as /work/.codepost_runner.R; remove it as the
+# first expression. Rscript opened --file= once at startup and reads through that
+# handle, so unlinking the path is safe. Guarded by name for local/test runs.
+local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(), value = TRUE))
+    if (length(f) == 1 && startsWith(basename(f), ".codepost_runner")) suppressWarnings(file.remove(f))
+})
+
 STUDENT_CODE_SYNTAX_INVALID <- FALSE
 STUDENT_CODE_SYNTAX_ERROR_MSG <- ""
 

@@ -2,6 +2,17 @@
 # This is a template for running jupyter notebook code cells inside a Docker container.
 # To use this template replace the placeholder {cells_b64} with a base64-encoded JSON array of cells, And packages_to_install with a list of packages to install.
 
+# The executor stages this script as /work/.codepost_runner.py; unlink it as the
+# very first statement so the harness/test code lives on disk only until Python
+# has read it (Python compiles the whole file before executing line 1). Guarded
+# by name so local/test runs of the template are unaffected.
+import os
+if os.path.basename(globals().get("__file__", "")).startswith(".codepost_runner"):
+    try:
+        os.unlink(__file__)
+    except OSError:
+        pass
+
 # START OF PACKAGE INSTALLATION TEMPLATE
 import subprocess
 import sys
@@ -24,6 +35,31 @@ os.environ['PIP_ROOT_USER_ACTION'] = 'ignore'
 if 'PIP_CACHE_DIR' not in os.environ:
     os.environ['PIP_CACHE_DIR'] = '/tmp/pip-cache'
 os.environ['MPLBACKEND'] = 'Agg'  # For matplotlib headless
+
+# Student-facing tracebacks: hide this template's own frames and show source
+# lines for the notebook cells (they never exist on disk, so linecache has to
+# be primed by hand). The instructor test script is deliberately NOT
+# registered, so tracebacks never reveal its source.
+import linecache
+from traceback import StackSummary, TracebackException
+
+_HIDDEN_TB_FILES = {globals().get("__file__", ""), "<string>"}
+
+
+def _register_source(pseudo_file: str, source: str) -> None:
+    # mtime=None entries survive linecache.checkcache()
+    linecache.cache[pseudo_file] = (len(source), None, source.splitlines(True), pseudo_file)
+
+
+def _format_student_traceback(exc: BaseException) -> str:
+    te = TracebackException.from_exception(exc)
+    node: Optional[TracebackException] = te
+    while node is not None:
+        node.stack = StackSummary.from_list(
+            [f for f in node.stack if f.filename not in _HIDDEN_TB_FILES]
+        )
+        node = node.__cause__ or node.__context__
+    return "".join(te.format())
 
 MAX_CELLS = 500  # Maximum number of cells allowed to prevent abuse
 
@@ -220,7 +256,7 @@ class TestCase:
             result.passed = False
             result.score = 0
             result.status = "error"
-            result.error = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            result.error = f"{type(e).__name__}: {str(e)}\n{_format_student_traceback(e)}"
             result.output = stdout_capture.getvalue()
 
 
@@ -442,6 +478,8 @@ else:
             try:
                 with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
                     exec_source = _prepare_cell_source(cell_source)
+                    cell_filename = f"<cell {cell['idx']}>"
+                    _register_source(cell_filename, exec_source)
                     try:
                         parsed = ast.parse(exec_source, mode='exec')
                         if parsed.body and isinstance(parsed.body[-1], ast.Expr):
@@ -449,21 +487,21 @@ else:
                             last_expr = parsed.body[-1].value
                             if setup_stmts:
                                 setup = ast.Module(body=setup_stmts, type_ignores=[])
-                                exec(compile(setup, '<cell>', 'exec'), namespace)
-                            result = eval(compile(ast.Expression(body=last_expr), '<cell>', 'eval'), namespace)
+                                exec(compile(setup, cell_filename, 'exec'), namespace)
+                            result = eval(compile(ast.Expression(body=last_expr), cell_filename, 'eval'), namespace)
                             if result is not None:
                                 print(repr(result))
                         else:
-                            exec(exec_source, namespace)
+                            exec(compile(exec_source, cell_filename, 'exec'), namespace)
                     except SyntaxError:
-                        exec(exec_source, namespace)
+                        exec(compile(exec_source, cell_filename, 'exec'), namespace)
             except Exception as e:
                 success = False
                 error_msg = str(e)
-                stderr_capture.write(traceback.format_exc())
+                stderr_capture.write(_format_student_traceback(e))
                 if isinstance(e, (SyntaxError, IndentationError, TabError)):
                     STUDENT_CODE_SYNTAX_INVALID = True
-                    STUDENT_CODE_SYNTAX_ERROR_MSG = traceback.format_exc()
+                    STUDENT_CODE_SYNTAX_ERROR_MSG = _format_student_traceback(e)
             
             stdout_text = stdout_capture.getvalue()
             stderr_text = stderr_capture.getvalue()

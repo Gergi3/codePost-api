@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from core.agent import errors, guardrails, shaping
 from core.agent.registry import SCOPE_ADMIN, SCOPE_WRITE, tool
-from core.agent.tools._common import course_header, fetch_assignment, load_roster
+from core.agent.tools._common import (course_header, fetch_assignment, load_roster,
+                                      unalias)
 from core.permissions.capabilities import Capability
 
 _ROLES = ('students', 'graders', 'courseAdmins', 'superGraders',
@@ -27,7 +28,8 @@ _ROLE_LIST_SCHEMA = {
     name='codepost_update_roster',
     title='Update roster',
     description=(
-        'Add or remove people from the course roster by email and role.\n\n'
+        'Add or remove people from the course roster by role. Students may '
+        'be given as aliases or emails; staff by email.\n\n'
         'ADDING someone with no codePost account creates one (and may email '
         'them, per course settings) — the dry run names which emails are new. '
         'REMOVING deactivates (it never deletes accounts or work) and requires '
@@ -55,8 +57,11 @@ def update_roster(ctx, add=None, remove=None, dryRun: bool = True,
 
     from core.views.course import CourseViewSet
 
-    add = {k: v for k, v in (add or {}).items() if v}
-    remove = {k: v for k, v in (remove or {}).items() if v}
+    # Canonicalize aliases to emails BEFORE the plan/args are built, so the
+    # Tier-2 confirm token agrees whether the model sends aliases or emails on
+    # either call. Brand-new typed addresses pass through unalias unchanged.
+    add = {k: [unalias(ctx, e) for e in v] for k, v in (add or {}).items() if v}
+    remove = {k: [unalias(ctx, e) for e in v] for k, v in (remove or {}).items() if v}
     if not add and not remove:
         raise errors.ToolError(
             'PRECONDITION_NOT_MET', 'Nothing to add or remove.',
@@ -119,6 +124,7 @@ def update_roster(ctx, add=None, remove=None, dryRun: bool = True,
             data=remove, pk=ctx.course.id, what='removing from the roster')
 
     ctx._roster = None                       # roster cache is now stale
+    ctx._aliases = None
     return shaping.envelope(
         {'course': course_header(ctx.course),
          'added': add, 'removed': remove,
@@ -145,9 +151,9 @@ def update_roster(ctx, add=None, remove=None, dryRun: bool = True,
                           'description': 'For rename/delete/setMembers.'},
             'name': {'type': 'string', 'description': 'For create/rename.'},
             'students': {'type': 'array', 'items': {'type': 'string'},
-                         'description': 'Emails (setMembers).'},
+                         'description': 'Student aliases or emails (setMembers).'},
             'leaders': {'type': 'array', 'items': {'type': 'string'},
-                        'description': 'Emails (create/setMembers).'},
+                        'description': 'Staff emails (create/setMembers).'},
             'dryRun': {'type': 'boolean', 'default': True},
         },
         'required': ['op'],
@@ -161,6 +167,8 @@ def manage_sections(ctx, op: str, sectionId=None, name: str = '', students=None,
                     leaders=None, dryRun: bool = True):
     from core.views.section import SectionViewSet
 
+    if students:
+        students = [unalias(ctx, s) for s in students]
     if op in ('rename', 'delete', 'setMembers') and sectionId is None:
         raise errors.ToolError(
             'PRECONDITION_NOT_MET', f"op='{op}' needs a sectionId.",

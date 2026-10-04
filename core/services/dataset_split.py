@@ -32,8 +32,9 @@ def split_master_dataset(master: AssignmentDataSet, rows_per_chunk: int,
     """Split ``master``'s file into disjoint row-chunks, each becoming its own
     ``is_student_variant=True`` dataset sharing one mount_path (enforced by
     AssignmentDataSet.save()). The header row (if any) is repeated in every chunk.
-    ``master`` itself is deactivated and excluded from the pool — it's the whole file, not
-    a per-student slice — but its data is kept, not deleted. Returns the created chunks.
+    ``master`` itself is deactivated and hidden from students (not mounted, not in their
+    download) and excluded from the pool — it's the whole file, not a per-student slice —
+    but its data is kept, not deleted. Returns the created chunks.
 
     ``replace=True`` regenerates in place: this master's prior auto-generated variants
     (``<stem>_variant_*``) are deleted first instead of raising on the name collision. That
@@ -105,8 +106,10 @@ def split_master_dataset(master: AssignmentDataSet, rows_per_chunk: int,
         created.append(chunk)
 
     # The master isn't itself a per-student slice — pull it out of circulation (but keep
-    # its data, don't delete) so it doesn't also get handed out as a "variant".
+    # its data, don't delete) so it doesn't also get handed out as a "variant": not mounted,
+    # and hidden so students don't get the whole file in their download either.
     master.is_active = False
-    master.save(update_fields=['is_active', 'modified'])
+    master.hidden = True
+    master.save(update_fields=['is_active', 'hidden', 'modified'])
 
     return created

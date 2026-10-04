@@ -68,10 +68,9 @@ class RubyExecutor(Executor):
         # But for consistency via our interface, we just use a filename
         filename = "script.rb"
         
-        # Need to write code to file using base64 echo trick
-        code_b64 = base64.b64encode(code.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{code_b64}' | base64 -d > {filename} && ruby {filename}"
-        command = ["sh", "-c", cmd_str]
+        # Staged into /work via _put_file before start (never through argv —
+        # Linux caps one argument at 128 KiB)
+        command = ["ruby", f"/work/{filename}"]
         
         container = self.get_container(
             image_name=self.image,
@@ -85,7 +84,8 @@ class RubyExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        self._put_file(container, '/work', filename, code)
+
         try:
             container.start()
             adjusted_timeout = timeout
@@ -118,6 +118,7 @@ class RubyNotebookExecutor(NotebookExecutor):
     DOCKER_IMAGE = "ruby:3.2-slim"
     EXECUTABLE_EXTENSIONS = ['.ipynb']
     EXECUTION_COMMAND = ["ruby"]
+    RUNNER_FILENAME = ".codepost_runner.rb"
     
     @classmethod
     def is_executable(cls, file_name: Optional[str] = None, extension: Optional[str] = None, code: Optional[str] = None) -> bool:
@@ -143,11 +144,4 @@ class RubyNotebookExecutor(NotebookExecutor):
             template = template.replace('{test_code_b64}', '')
         
         return template
-    
-    def _get_execution_command(self, template: str) -> List[str]:
-        """Write template to file inside container and execute with Ruby interpreter."""
-        # Base64 encode and write inside container, same pattern as Node.js
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{template_b64}' | base64 -d > /tmp/notebook.rb && ruby /tmp/notebook.rb"
-        return ["sh", "-c", cmd_str]
 

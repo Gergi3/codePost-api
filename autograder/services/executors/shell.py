@@ -60,6 +60,7 @@ class ShellExecutor(Executor):
         labels: Optional[Dict[str, str]] = None,
         tmpfs_size: str = "size=512m,mode=1777",
         run_pre_script: bool = False,
+        dataset_ids: Optional[list[int]] = None,
     ) -> Tuple[ShellExecutor, Dict[str, Dict[str, str]], Dict[str, str], str, Any, Any]:
         client = Executor._get_docker_client()
         if not client:
@@ -72,6 +73,7 @@ class ShellExecutor(Executor):
             env=env,
             include_datasets=include_datasets,
             include_assignment_files=include_assignment_files,
+            dataset_ids=dataset_ids,
         )
 
         default_labels = {
@@ -131,6 +133,7 @@ def open_shell_session(
     labels: Optional[Dict[str, str]] = None,
     tmpfs_size: str = "size=512m,mode=1777",
     run_pre_script: bool = False,
+    dataset_ids: Optional[list[int]] = None,
 ) -> Tuple[ShellExecutor, Dict[str, Dict[str, str]], Dict[str, str], str, Any, Any]:
     """
     Start a shell session container and return (executor, volumes, docker_env, staging_dir, container, socket).
@@ -143,22 +146,41 @@ def open_shell_session(
         labels=labels,
         tmpfs_size=tmpfs_size,
         run_pre_script=run_pre_script,
+        dataset_ids=dataset_ids,
     )
+
+
+def select_shell_datasets(assignment, include_datasets: bool, dataset_ids: Optional[list[int]] = None):
+    """Which datasets a shell session mounts.
+
+    ``dataset_ids=None`` (no selection sent) mounts the same shared set a normal run gets:
+    active, not a per-student variant, not a test resource. Variants all share one mount path,
+    so mounting the whole pool would collide; test resources belong to a test category's runs.
+    An explicit list mounts exactly those ids — any variant or test resource the instructor
+    picks — restricted to this assignment's active datasets (unknown ids are dropped).
+    """
+    if not include_datasets or assignment is None:
+        return []
+    qs = assignment.dataSets.filter(is_active=True)
+    if dataset_ids is None:
+        qs = qs.filter(is_student_variant=False, is_test_resource=False)
+    else:
+        qs = qs.filter(id__in=dataset_ids)
+    return list(qs)
 
 
 def build_shell_context(
     env: Environment,
     include_datasets: bool,
     include_assignment_files: bool,
+    dataset_ids: Optional[list[int]] = None,
 ) -> Tuple[ShellExecutor, Dict[str, Dict[str, str]], Dict[str, str], str]:
     """
     Build executor context for a shell session.
     Returns (executor, volumes, docker_env, temp_staging_dir).
     """
     assignment = env.assignment
-    datasets = []
-    if include_datasets and assignment:
-        datasets = list(assignment.dataSets.filter(is_active=True))
+    datasets = select_shell_datasets(assignment, include_datasets, dataset_ids)
 
     shell_file = _ShellFile(assignment)
     executor = ShellExecutor(cast(FileLike, shell_file), datasets=datasets, image_name=env.image_name)

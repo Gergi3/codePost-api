@@ -64,9 +64,10 @@ class PHPExecutor(Executor):
         if not template:
             return ExecutionResult.error("Failed to get code template")
 
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{template_b64}' | base64 -d > wrapper.php && php wrapper.php"
-        command = ["sh", "-c", cmd_str]
+        # The rendered template is staged into /work as a self-deleting runner
+        # file (never through argv — Linux caps one argument at 128 KiB).
+        runner_filename = ".codepost_runner.php"
+        command = ["php", f"/work/{runner_filename}"]
         
         container = self.get_container(
             image_name=self.image,
@@ -80,7 +81,8 @@ class PHPExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        self._put_file(container, '/work', runner_filename, template)
+
         try:
             container.start()
             adjusted_timeout = timeout + (30 if packages else 0)
@@ -122,6 +124,7 @@ class PHPNotebookExecutor(NotebookExecutor):
     DOCKER_IMAGE = "php:8.2-cli"
     EXECUTABLE_EXTENSIONS = ['.ipynb']
     EXECUTION_COMMAND = ["php"]
+    RUNNER_FILENAME = ".codepost_runner.php"
     
     @classmethod
     def is_executable(cls, file_name: Optional[str] = None, extension: Optional[str] = None, code: Optional[str] = None) -> bool:
@@ -142,9 +145,3 @@ class PHPNotebookExecutor(NotebookExecutor):
         test_code_b64 = base64.b64encode(test_code.encode('utf-8')).decode('utf-8') if test_code else ""
         template = template.replace('{test_code_b64}', test_code_b64)
         return template
-    
-    def _get_execution_command(self, template: str) -> List[str]:
-        # PHP needs the template written to a file first
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{template_b64}' | base64 -d > /tmp/notebook.php && php /tmp/notebook.php"
-        return ["sh", "-c", cmd_str]

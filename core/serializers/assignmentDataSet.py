@@ -1,9 +1,22 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+import copy
+
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
 from core.constants import MAX_DATASET_SIZE
 from core.models import AssignmentDataSet
+
+
+def _shallow_copy(data):
+    """Mutable copy of request data that does NOT deep-copy uploaded files.
+
+    ``QueryDict.copy()`` is a deepcopy, and an upload bigger than
+    FILE_UPLOAD_MAX_MEMORY_SIZE (2.5 MB) arrives as a TemporaryUploadedFile wrapping an
+    open temp file, which can't be deep-copied ("cannot pickle 'BufferedRandom'") — every
+    dataset over 2.5 MB 500'd. ``copy.copy`` uses QueryDict.__copy__, which is shallow.
+    """
+    return copy.copy(data)
 
 
 class AssignmentDataSetSerializer(serializers.ModelSerializer):
@@ -43,7 +56,7 @@ class AssignmentDataSetSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created', 'modified', 'fileUrl', 'fileSize', 'fileName', 'hidden']
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:
@@ -107,7 +120,7 @@ class AssignmentDataSetCreateSerializer(serializers.ModelSerializer):
         ]
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:
@@ -119,12 +132,18 @@ class AssignmentDataSetCreateSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
 
     def validate_file(self, value):
-        """Validate file size"""
+        """Validate file size, then that the content matches the extension (a renamed CSV
+        or an HTML error page saved as .zip would otherwise only fail in a student's code)."""
         if value.size > MAX_DATASET_SIZE:
             raise serializers.ValidationError(
                 f"File size exceeds maximum allowed size of {MAX_DATASET_SIZE / (1024**3):.1f} GB"
             )
-        
+
+        from core.services.dataset_validation import dataset_file_problem
+        problem = dataset_file_problem(value.name or '', value, value.size)
+        if problem:
+            raise serializers.ValidationError(problem)
+
         return value
 
 
@@ -143,13 +162,14 @@ class AssignmentDataSetUpdateSerializer(serializers.ModelSerializer):
             'description',
             'mountPath',
             'isActive',
+            'hidden',
             'isTestResource',
             'isStudentVariant',
             'autogradeAllVariants',
         ]
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = _shallow_copy(data)
         if 'mount_path' in data and 'mountPath' not in data:
             data['mountPath'] = data['mount_path']
         if 'is_active' in data and 'isActive' not in data:

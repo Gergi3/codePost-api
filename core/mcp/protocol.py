@@ -145,6 +145,13 @@ def _initialize(params: dict, conn) -> dict:
             'other tool. Then codepost_get_course_overview resolves assignment '
             'names to ids within the chosen course.'
         )
+    instructions += (
+        ' Students are identified by stable pseudonymous aliases such as '
+        'student-3f9a1c2d40 — never by email. Use the alias anywhere a tool '
+        'takes a student; staff (graders, admins) are shown by email. Never '
+        'put an alias in text a student will read. The instructor can resolve '
+        'an alias under Course Settings → Student Aliases.'
+    )
     return {
         'protocolVersion': version,
         # listChanged is false: the tool set is fixed for a credential's scope,
@@ -211,11 +218,23 @@ def _tools_call(params: dict, conn) -> dict:
         payload = spec.handler(ctx, **arguments)
     except ToolError as exc:
         _audit_write(spec, conn, arguments, course=course_obj, denied=exc)
-        return _tool_result(exc.to_payload(), is_error=True)
+        return _tool_result(_scrub(exc.to_payload(), course_obj), is_error=True)
 
     _audit_write(spec, conn, arguments, course=course_obj,
                  applied=not arguments.get('dryRun', _dry_default(spec)))
-    return _tool_result(payload, is_error=False)
+    return _tool_result(_scrub(payload, course_obj), is_error=False)
+
+
+def _scrub(payload, course):
+    """Pseudonymize student identities in everything that leaves the boundary.
+
+    Built AFTER the handler ran, so roster changes made by this very call
+    (update_roster) are already in the map. Errors raised before the course
+    resolved carry no student data."""
+    if course is None:                       # courseless tools (list_courses)
+        return payload
+    from core.agent.privacy import StudentAliasMap
+    return StudentAliasMap.for_course(course).scrub(payload)
 
 
 def _dry_default(spec) -> bool:

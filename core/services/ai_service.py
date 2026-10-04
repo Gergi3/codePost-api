@@ -26,10 +26,11 @@ import hashlib
 import logging
 import re
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
 from dataclasses import dataclass
 from core.constants import DEFAULT_OLLAMA_URL, DEFAULT_PORTKEY_URL
 from core.models import Course, Assignment, Submission, SubmissionFile, User
+from core.services.ai_json import quiz_questions_schema
 
 import asyncio
 import random
@@ -37,6 +38,7 @@ import random
 if TYPE_CHECKING:
     import pymupdf
     from core.models import PromptExperiment
+    from core.prompts.variables import ImageAttachment
 
 
 # -----------------------------------------------------------------------
@@ -604,20 +606,28 @@ class AIService:
             logger.warning(f"Failed to format prompt template: {e}")
             return "\n\n".join([template, self.GLOBAL_SYSTEM_PROMPT])
 
-    async def _dispatch_provider(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
-        """Route to the configured provider. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+    async def _dispatch_provider(self, system_prompt: str, user_prompt: str,
+                                 images: 'Sequence[ImageAttachment]' = (),
+                                 response_schema: dict | None = None) -> tuple[str, int, int, int, int]:
+        """Route to the configured provider. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
+
+        ``images`` ride on the user turn as vision input (system messages can't carry them).
+        ``response_schema`` (a JSON Schema with an object root) switches on the provider's
+        structured output, so the reply is valid JSON of that shape rather than free text."""
         if self.provider == 'gemini':
-            return await self._call_gemini(system_prompt, user_prompt)
+            return await self._call_gemini(system_prompt, user_prompt, images, response_schema)
         elif self.provider == 'openai':
-            return await self._call_openai(system_prompt, user_prompt)
+            return await self._call_openai(system_prompt, user_prompt, images, response_schema)
         elif self.provider == 'ollama':
-            return await self._call_ollama(system_prompt, user_prompt)
+            return await self._call_ollama(system_prompt, user_prompt, images, response_schema)
         elif self.provider in ('portkey', 'custom'):
-            return await self._call_portkey(system_prompt, user_prompt)
+            return await self._call_portkey(system_prompt, user_prompt, images, response_schema)
         else:
             raise ValueError(f"Unknown AI provider: {self.provider}")
 
-    async def _generate(self, system_prompt: str, user_prompt: str, label: str = 'generation') -> GenerationResult:
+    async def _generate(self, system_prompt: str, user_prompt: str, label: str = 'generation',
+                        images: 'Sequence[ImageAttachment]' = (),
+                        response_schema: dict | None = None) -> GenerationResult:
         """Dispatch to the configured provider and wrap the result.
 
         Handles provider routing, token bookkeeping, and error translation
@@ -625,7 +635,8 @@ class AIService:
         ``GenerationResult``.
         """
         try:
-            text, input_tokens, output_tokens, total_tokens, cached_tokens = await self._dispatch_provider(system_prompt, user_prompt)
+            text, input_tokens, output_tokens, total_tokens, cached_tokens = await self._dispatch_provider(
+                system_prompt, user_prompt, images, response_schema)
             return GenerationResult(
                 text=text,
                 success=True,
@@ -1407,8 +1418,38 @@ end"""
             logger.info(f"Gemini explicit cache creation skipped ({type(e).__name__}): {e}")
             return None
 
-    async def _call_gemini(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    @staticmethod
+    def _openai_user_content(user_prompt: str, images: 'Sequence[ImageAttachment]'):
+        """OpenAI chat 'content': a plain string, or text + image_url parts (data URIs are
+        accepted as-is) when images are attached. Shared by OpenAI and Portkey/custom."""
+        if not images:
+            return user_prompt
+        return [{"type": "text", "text": user_prompt}] + [
+            {"type": "image_url", "image_url": {"url": f"data:{img.mime};base64,{img.base64_data}"}}
+            for img in images
+        ]
+
+    @staticmethod
+    def _retry_feedback(prior_error: str) -> str:
+        """User-prompt suffix for a re-ask: tell the model what was wrong with its last
+        reply. Models fix their own output far more reliably when told what broke."""
+        if not prior_error:
+            return ''
+        return ("\n\nYour previous reply could not be used: "
+                f"{prior_error.strip()} Reply again with only the corrected JSON.")
+
+    @staticmethod
+    def _openai_response_format(schema: dict) -> dict:
+        """OpenAI structured-output ``response_format`` for a JSON Schema (strict: the
+        reply is guaranteed to match, not just to be valid JSON)."""
+        return {"type": "json_schema",
+                "json_schema": {"name": "response", "schema": schema, "strict": True}}
+
+    async def _call_gemini(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = (),
+                           response_schema: dict | None = None) -> tuple[str, int, int, int, int]:
         """Call Google Gemini API. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+        import base64
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=self.api_key)
@@ -1424,10 +1465,19 @@ end"""
             config = types.GenerateContentConfig(
                 system_instruction=system_prompt,
             )
+        if response_schema is not None:
+            config.response_mime_type = 'application/json'
+            config.response_json_schema = response_schema
 
+        contents: Any = user_prompt
+        if images:
+            contents = [types.Part.from_text(text=user_prompt)] + [
+                types.Part.from_bytes(data=base64.b64decode(img.base64_data), mime_type=img.mime)
+                for img in images
+            ]
         response = await client.aio.models.generate_content(
             model=self.model,
-            contents=user_prompt,
+            contents=contents,
             config=config,
         )
         input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
@@ -1437,17 +1487,23 @@ end"""
         self._last_provider_meta = {'model': getattr(response, 'model_version', None)}
         return response.text or "", input_tokens, output_tokens, total_tokens, cached_tokens
     
-    async def _call_openai(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    async def _call_openai(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = (),
+                           response_schema: dict | None = None) -> tuple[str, int, int, int, int]:
         """Call OpenAI API. Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
         from openai import AsyncOpenAI
         
         client = AsyncOpenAI(api_key=self.api_key)
+        extra: dict[str, Any] = {}
+        if response_schema is not None:
+            extra['response_format'] = self._openai_response_format(response_schema)
         response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, images)},
             ],
+            **extra,
         )
         usage = response.usage
         input_tokens = usage.prompt_tokens if usage else 0
@@ -1460,20 +1516,30 @@ end"""
         self._last_provider_meta = {'model': getattr(response, 'model', None)}
         return response.choices[0].message.content or "", input_tokens, output_tokens, total_tokens, cached_tokens
     
-    async def _call_ollama(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
-        """Call Ollama API (self-hosted). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens)."""
+    async def _call_ollama(self, system_prompt: str, user_prompt: str,
+                           images: 'Sequence[ImageAttachment]' = (),
+                           response_schema: dict | None = None) -> tuple[str, int, int, int, int]:
+        """Call Ollama API (self-hosted). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
+
+        Images go in the bare-base64 ``images`` list; only a vision model (llava, gemma3,
+        qwen-vl, ...) will actually look at them — a text-only model silently ignores them."""
         import httpx
         
         base_url = self.base_url or DEFAULT_OLLAMA_URL
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "system": system_prompt,
+            "prompt": user_prompt,
+            "stream": False,
+        }
+        if images:
+            payload["images"] = [img.base64_data for img in images]
+        if response_schema is not None:
+            payload["format"] = response_schema
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "system": system_prompt,
-                    "prompt": user_prompt,
-                    "stream": False,
-                },
+                json=payload,
                 timeout=60.0,
             )
             response.raise_for_status()
@@ -1483,7 +1549,9 @@ end"""
             self._last_provider_meta = {'model': data.get('model')}
             return data["response"], input_tokens, output_tokens, input_tokens + output_tokens, 0
     
-    async def _call_portkey(self, system_prompt: str, user_prompt: str) -> tuple[str, int, int, int, int]:
+    async def _call_portkey(self, system_prompt: str, user_prompt: str,
+                            images: 'Sequence[ImageAttachment]' = (),
+                            response_schema: dict | None = None) -> tuple[str, int, int, int, int]:
         """Call Portkey AI gateway (self-hosted or cloud). Returns (text, input_tokens, output_tokens, total_tokens, cached_tokens).
         
         Portkey is an AI Gateway that proxies requests to underlying providers.
@@ -1518,19 +1586,24 @@ end"""
                 headers["x-portkey-metadata"] = json.dumps(metadata)
                 headers["x-portkey-trace-id"] = self._trace_id
 
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, images)},
+            ],
+        }
+        if response_schema is not None:
+            body["response_format"] = self._openai_response_format(response_schema)
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                url,
-                headers=headers,
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-                timeout=60.0,
-            )
+            response = await client.post(url, headers=headers, json=body, timeout=60.0)
+            if "response_format" in body and response.status_code == 400:
+                # An OpenAI-compatible endpoint that doesn't do structured output: ask
+                # again as free text and let the lenient parser cope.
+                logger.warning(f"{self.provider} rejected response_format ({response.text[:300]}); "
+                               "retrying without it")
+                del body["response_format"]
+                response = await client.post(url, headers=headers, json=body, timeout=60.0)
             response.raise_for_status()
             data = response.json()
             usage = data.get('usage', {})
@@ -1623,6 +1696,9 @@ end"""
                 'name': sf.name,
                 'extension': sf.extension,
                 'content': content,
+                # Raw stored data (pre-extraction) so prompt variables can dedup a file
+                # that also appears as an unchanged assignment file.
+                'data': sf.data,
                 'is_notebook': is_notebook,
                 'is_student_file': _is_student_file(sf),
             })
@@ -2058,6 +2134,7 @@ Provide a concise markdown summary following the guidelines in your instructions
         question_types: Optional[list[str]] = None,
         source_question=None,
         instructions: str = '',
+        prior_error: str = '',
     ) -> GenerationResult:
         """Generate suggested quiz questions from an assignment and course material.
 
@@ -2067,6 +2144,8 @@ Provide a concise markdown summary following the guidelines in your instructions
         - Refresh (``source_question`` set): produce one improved variant of an existing
           question — the cross-semester "update this question" path.
 
+        ``prior_error`` is what went wrong with the previous reply (a re-ask after
+        unusable output); it is quoted back so the model corrects it.
         Returns a ``GenerationResult`` whose ``text`` is a JSON array of question objects.
         """
         from asgiref.sync import sync_to_async
@@ -2180,15 +2259,17 @@ Provide a concise markdown summary following the guidelines in your instructions
             "Only essay and code questions omit choices. Each question may include an optional "
             '"description" — it is shown to the student beneath the stem and rendered as Markdown, '
             "so use Markdown there for highlighting (fenced code blocks, bold, inline code)."
-        )
-        result = await self._generate(system_prompt, user_prompt, label='quiz question generation')
+        ) + self._retry_feedback(prior_error)
+        result = await self._generate(system_prompt, user_prompt, label='quiz question generation',
+                                      response_schema=quiz_questions_schema())
         if result.success:
             result.text = result.text.strip()
             result.variant_id = variant_id
         return result
 
     async def generate_personalized_quiz_questions(self, section, submission,
-                                                   demo_files=None) -> GenerationResult:
+                                                   demo_files=None,
+                                                   prior_error: str = '') -> GenerationResult:
         """Generate per-student quiz questions for one QuizGeneratedSection from the
         student's submission.
 
@@ -2198,10 +2279,12 @@ Provide a concise markdown summary following the guidelines in your instructions
         The model sees ONLY what the prompt's variables reference — nothing is attached
         implicitly (instructors opt in via {submission_files}, {submission_test_results},
         etc.; the section editor's default template references them).
+        ``prior_error`` is what went wrong with the previous reply (a re-ask after
+        unusable output); it is quoted back so the model corrects it.
         Returns a ``GenerationResult`` whose ``text`` is a JSON array of question objects.
         """
         from asgiref.sync import sync_to_async
-        from core.prompts.variables import VariableContext, substitute_variables
+        from core.prompts.variables import VariableContext, resolve_template
 
         def _collect_context():
             # Submission is None on the eager path (submission-free prompts, including
@@ -2211,15 +2294,15 @@ Provide a concise markdown summary following the guidelines in your instructions
             ctx = VariableContext(course=self.course, assignment=assignment,
                                   submission=submission, section=section,
                                   demo_files=demo_files)
-            instructor_text, _ = substitute_variables(section.systemPrompt, ctx)
+            resolved = resolve_template(section.systemPrompt, ctx)
             try:
                 language = (assignment.environment.language or '') if assignment else ''
             except Exception:
                 language = ''
             name = assignment.name if assignment is not None else section.quiz.title
-            return instructor_text, name, language
+            return resolved.text, resolved.images, name, language
 
-        instructor_text, assignment_name, language = await sync_to_async(_collect_context)()
+        instructor_text, images, assignment_name, language = await sync_to_async(_collect_context)()
 
         question_types = section.questionTypes or [
             'multiple_choice', 'true_false', 'short_answer', 'essay', 'code']
@@ -2248,8 +2331,11 @@ Provide a concise markdown summary following the guidelines in your instructions
             'CRITICAL: every question MUST include a non-empty "reference_solution" — a '
             "grader-only answer key (correct answer/working code, plus worked steps for "
             "hand-computation questions). It is never shown to the student."
-        )
-        result = await self._generate(system_prompt, user_prompt, label='personalized quiz generation')
+        ) + self._retry_feedback(prior_error)
+        # Images referenced by the instructor's variables ride on the user turn; the
+        # "(image attached: …)" markers in instructor_text tell the model what they are.
+        result = await self._generate(system_prompt, user_prompt, label='personalized quiz generation',
+                                      images=images, response_schema=quiz_questions_schema())
         # Recorded (success or not) so staff can inspect exactly what the model was given.
         result.resolved_prompt = instructor_text
         if result.success:
@@ -2453,7 +2539,11 @@ def build_context_from_file(
             
         # Include assignment files
         for assign_file in assignment.files.all():
-            other_files.append(f"**[Assignment File] {assign_file.name}:**\n```\n{assign_file.data}\n```")
+            # Binary files (images, ...) are stored as data URIs — never inline base64.
+            af_data = assign_file.data
+            if af_data.startswith('data:'):
+                af_data = f"(binary file '{assign_file.name}' not shown)"
+            other_files.append(f"**[Assignment File] {assign_file.name}:**\n```\n{af_data}\n```")
             
         context.all_files_content = '\n\n'.join(other_files)
     

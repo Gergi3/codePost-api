@@ -642,7 +642,42 @@ class TestSplitMasterDataset:
 
         master.refresh_from_db()
         assert master.is_active is False
+        assert master.hidden is True  # students must not get the whole file in their download
         assert master.is_student_variant is False
+
+    def test_split_master_not_delivered_to_students(self, api_client, variant_setup):
+        """After a split, the student's listing and download zip carry their own variant
+        chunk but never the master — the master is the whole dataset, handing it out would
+        defeat per-student variants."""
+        import base64
+        import io
+        import zipfile
+        from core.services.dataset_split import split_master_dataset
+
+        # Start from a clean pool so the student's variant is one of the split chunks.
+        AssignmentDataSet.objects.filter(
+            assignment=variant_setup['assignment'], is_student_variant=True).delete()
+        master = self._master(variant_setup, rows=4)
+        chunks = split_master_dataset(master, rows_per_chunk=2)
+        chunk_filenames = {c.file.name.split('/')[-1] for c in chunks}
+        master_filename = master.file.name.split('/')[-1]
+
+        student = variant_setup['students'][0]
+        api_client.force_authenticate(user=student)
+
+        resp = api_client.get(
+            f"/assignmentDataSets/by_assignment/?assignment_id={variant_setup['assignment'].id}")
+        assert resp.status_code == status.HTTP_200_OK
+        listed = {d['id'] for d in resp.data}
+        assert master.id not in listed
+        assert len(listed & {c.id for c in chunks}) == 1
+
+        resp = api_client.get(f"/assignments/{variant_setup['assignment'].id}/download/")
+        assert resp.status_code == status.HTTP_200_OK
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(resp.data['zip']))) as zf:
+            data_names = {n[len('data/'):] for n in zf.namelist() if n.startswith('data/')}
+        assert master_filename not in data_names
+        assert len(data_names & chunk_filenames) == 1
 
     def test_service_respects_max_chunks(self, variant_setup, monkeypatch):
         from core.services import dataset_split
@@ -908,3 +943,176 @@ class TestDatasetTruncationWarning:
         section = self._section(variant_setup, 'Use {student_dataset} to write questions.')
         data = QuizGeneratedSectionSerializer(section).data
         assert data['datasetTruncationWarning'] is None
+
+
+# --------------------------------------------------------------------------- #
+# Dataset update API (PATCH /assignmentDataSets/{id}/) — `hidden` is editable
+# --------------------------------------------------------------------------- #
+
+class TestDatasetUpdateAPI:
+    def test_admin_can_hide_a_shared_dataset(self, api_client, variant_setup):
+        """Unticking "include in students' download" after upload must be possible — before,
+        `hidden` was upload-time only and a mistake meant re-uploading."""
+        shared = variant_setup['shared']
+        student = variant_setup['students'][0]
+
+        api_client.force_authenticate(user=student)
+        resp = api_client.get(f"/assignmentDataSets/{shared.id}/")
+        assert resp.status_code == status.HTTP_200_OK
+
+        api_client.force_authenticate(user=variant_setup['admin'])
+        resp = api_client.patch(f"/assignmentDataSets/{shared.id}/", {'hidden': True}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data['hidden'] is True
+        shared.refresh_from_db()
+        assert shared.hidden is True
+
+        api_client.force_authenticate(user=student)
+        resp = api_client.get(f"/assignmentDataSets/{shared.id}/")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_admin_can_unhide_a_dataset(self, api_client, variant_setup):
+        hidden = variant_setup['hidden']
+        api_client.force_authenticate(user=variant_setup['admin'])
+        resp = api_client.patch(f"/assignmentDataSets/{hidden.id}/", {'hidden': False}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        hidden.refresh_from_db()
+        assert hidden.hidden is False
+
+    def test_test_resource_stays_hidden(self, api_client, variant_setup):
+        """A test-category fixture is never student-visible; the model forces hidden=True on
+        save, so a PATCH trying to un-hide it is a no-op rather than a leak."""
+        fixture = AssignmentDataSet.objects.create(
+            assignment=variant_setup['assignment'], name='fixture.csv', is_test_resource=True,
+            file=SimpleUploadedFile('fixture.csv', b'k,v\n'))
+        assert fixture.hidden is True
+
+        api_client.force_authenticate(user=variant_setup['admin'])
+        resp = api_client.patch(f"/assignmentDataSets/{fixture.id}/", {'hidden': False}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        fixture.refresh_from_db()
+        assert fixture.hidden is True
+
+    def test_grader_cannot_update(self, api_client, variant_setup):
+        api_client.force_authenticate(user=variant_setup['grader'])
+        resp = api_client.patch(
+            f"/assignmentDataSets/{variant_setup['shared'].id}/", {'hidden': True}, format='json')
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+# --------------------------------------------------------------------------- #
+# Upload validation (POST /assignmentDataSets/) — content must match the extension
+# --------------------------------------------------------------------------- #
+
+class TestDatasetUploadValidation:
+    def _post(self, api_client, setup, filename, content, **extra):
+        api_client.force_authenticate(user=setup['admin'])
+        return api_client.post('/assignmentDataSets/', {
+            'assignment': setup['assignment'].id,
+            'name': filename,
+            'file': SimpleUploadedFile(filename, content),
+            **extra,
+        }, format='multipart')
+
+    @staticmethod
+    def _real_zip():
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('a.csv', 'x,y\n1,2\n')
+        return buf.getvalue()
+
+    def test_fake_zip_is_rejected_with_a_file_error(self, api_client, variant_setup):
+        """The reported case: a .zip whose content isn't a zip (e.g. an HTML page, or a CSV
+        someone renamed) must fail at upload, not in the student's code."""
+        resp = self._post(api_client, variant_setup, 'data.zip', b'<html>Not Found</html>')
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'file' in resp.data
+        assert 'not a valid ZIP archive' in str(resp.data['file'])
+        assert not AssignmentDataSet.objects.filter(name='data.zip').exists()
+
+    def test_real_zip_is_accepted_and_still_readable(self, api_client, variant_setup):
+        import io
+        import zipfile
+        resp = self._post(api_client, variant_setup, 'data.zip', self._real_zip())
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+        ds = AssignmentDataSet.objects.get(id=resp.data['id'])
+        with ds.file.open('rb') as f:
+            assert zipfile.ZipFile(io.BytesIO(f.read())).namelist() == ['a.csv']
+
+    def test_truncated_zip_is_rejected(self, api_client, variant_setup):
+        """Starts with the right magic bytes but has no central directory."""
+        resp = self._post(api_client, variant_setup, 'cut.zip', self._real_zip()[:12])
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'file' in resp.data
+
+    def test_zip_based_container_is_checked_too(self, api_client, variant_setup):
+        resp = self._post(api_client, variant_setup, 'grades.xlsx', b'name,grade\nA,1\n')
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'Excel workbook' in str(resp.data['file'])
+
+    @pytest.mark.parametrize('filename,content', [
+        ('data.tar.gz', b'name,grade\n'),
+        ('weights.npy', b'not numpy'),
+        ('report.pdf', b'<html></html>'),
+    ])
+    def test_signature_mismatch_is_rejected(self, api_client, variant_setup, filename, content):
+        resp = self._post(api_client, variant_setup, filename, content)
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'file' in resp.data
+
+    def test_matching_signature_is_accepted(self, api_client, variant_setup):
+        import gzip
+        resp = self._post(api_client, variant_setup, 'data.csv.gz', gzip.compress(b'x,y\n1,2\n'))
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+
+    def test_empty_file_is_rejected(self, api_client, variant_setup):
+        resp = self._post(api_client, variant_setup, 'empty.csv', b'')
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'empty' in str(resp.data['file'])
+
+    def test_text_and_unknown_extensions_are_not_inspected(self, api_client, variant_setup):
+        """A UTF-16 CSV (NUL bytes everywhere) and a custom extension both pass — only
+        formats with a definitive signature are checked."""
+        resp = self._post(api_client, variant_setup, 'utf16.csv', 'x,y\n1,2\n'.encode('utf-16'))
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+        resp = self._post(api_client, variant_setup, 'model.bin', b'\x00\x01\x02')
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+
+
+# --------------------------------------------------------------------------- #
+# Upload: files over FILE_UPLOAD_MAX_MEMORY_SIZE arrive as TemporaryUploadedFile
+# --------------------------------------------------------------------------- #
+
+class TestDatasetUpload:
+    def test_upload_larger_than_memory_threshold(self, api_client, variant_setup, settings, tmp_path):
+        """A >2.5 MB upload is spooled to a temp file; the serializer used to deep-copy
+        the request QueryDict (and that open file with it) and 500'd."""
+        import io
+        import os
+        import zipfile
+        settings.MEDIA_ROOT = str(tmp_path)
+        settings.FILE_UPLOAD_MAX_MEMORY_SIZE = 1024
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('names.txt', os.urandom(64 * 1024))
+
+        api_client.force_authenticate(user=variant_setup['admin'])
+        resp = api_client.post('/assignmentDataSets/', {
+            'assignment': variant_setup['assignment'].id,
+            'name': 'namesbystate.zip',
+            'mount_path': 'shared/namesbystate.zip',
+            'is_active': 'true',
+            'hidden': 'true',
+            'is_student_variant': 'false',
+            'autogradeAllVariants': 'false',
+            'file': SimpleUploadedFile('namesbystate.zip', buf.getvalue()),
+        }, format='multipart')
+
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+        dataset = AssignmentDataSet.objects.get(id=resp.data['id'])
+        assert dataset.mount_path == 'shared/namesbystate.zip'
+        assert dataset.is_active and dataset.hidden
+        assert zipfile.is_zipfile(dataset.file.path)

@@ -202,3 +202,49 @@ class TestElicitationFlow:
         assert err["code"] == "CONFIRMATION_REQUIRED"
         assert "timed out" in err["message"]
         assert Assignment.objects.filter(pk=empty_assignment.id).exists()
+
+
+class TestElicitationPrivacy:
+    """The approval dialog crosses the MCP client, so it gets the same
+    student scrub as a tool result."""
+
+    @pytest.fixture
+    def released_assignment(self, course):
+        from django.contrib.auth.models import User
+        from core.models import Assignment, Profile, Submission
+        with factory.django.mute_signals(post_save):
+            student = User.objects.create(username="zq7712",
+                                          email="zq7712@rutgers.edu")
+            Profile.objects.get_or_create(user=student)
+            course.students.add(student)
+            a = Assignment.objects.create(course=course, name="Released",
+                                          points=10, state="published",
+                                          feedbackStatus="released")
+            sub = Submission.objects.create(assignment=a, isFinalized=True,
+                                            grader=course.graders.first())
+            sub.students.set([student])
+        return a
+
+    def test_dialog_and_result_carry_aliases_not_emails(
+            self, api_client, admin_key, session_id, course, released_assignment):
+        from core.agent.privacy import alias_for
+
+        api_client.credentials(HTTP_AUTHORIZATION=f"CourseKey {admin_key}",
+                               HTTP_MCP_PROTOCOL_VERSION=V,
+                               HTTP_MCP_SESSION_ID=session_id)
+        resp = api_client.post(MCP_URL, {
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "codepost_notify_students_feedback_ready",
+                       "arguments": {"assignmentId": released_assignment.id}},
+        }, format="json")
+        assert resp.streaming
+        stream = iter(resp.streaming_content)
+        ask = parse_event(next(stream))
+        assert ask["method"] == "elicitation/create"
+        message = ask["params"]["message"]
+        assert alias_for(course.id, "zq7712@rutgers.edu") in message
+        assert "zq7712" not in message.lower()
+
+        answer(admin_key, session_id, ask["id"], "decline")
+        final = parse_event(list(stream)[-1])
+        assert "zq7712" not in json.dumps(final).lower()

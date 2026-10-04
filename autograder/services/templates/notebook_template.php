@@ -1,6 +1,10 @@
 // Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
 <?php
 
+// The executor stages this script as /work/.codepost_runner.php; unlink it first
+// thing (PHP has already read the whole file). Guarded by name for local/test runs.
+if (str_starts_with(basename(__FILE__), '.codepost_runner')) { @unlink(__FILE__); }
+
 $CELLS_B64 = "{cells_b64}";
 $TEST_CODE_B64 = "{test_code_b64}";
 

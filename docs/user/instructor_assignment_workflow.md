@@ -246,8 +246,9 @@ Assignment files are the starter code, helper libraries, and test resources you 
 
 ### Adding files
 
-- Click **Add File**, enter a name (including extension, e.g., `main.py`), and optionally paste or upload code content.
-- For Jupyter notebooks (`.ipynb`), an embedded notebook editor opens automatically.
+- **Drag files onto the panel** (or click the drop zone) to add them. Drop several at once; a `.zip` is expanded into its folder structure, so you can upload a whole project in one go. Files up to 3 MB each.
+- **Add empty file** creates a named file with no content, for a stub students must complete. Enter a name (including extension, e.g., `main.py`) and an optional directory, then open **View** to write the content.
+- Use **Replace** on a row to swap in a different file, **Rename** to change its name or directory, and **View** to edit the content in place. For Jupyter notebooks (`.ipynb`), an embedded notebook editor opens automatically.
 
 ### File options
 

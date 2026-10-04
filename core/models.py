@@ -1228,6 +1228,10 @@ class AssignmentDataSet(BaseModel):
     if self.is_test_resource:
       self.hidden = True
 
+    # ~/shared/x, /srv/shared/x, /shared/x ... all mean the shared folder: store one form.
+    from core.services.mount_paths import normalize_mount_path
+    self.mount_path = normalize_mount_path(self.mount_path)
+
     # Set default mount_path if not provided
     if not self.mount_path and self.name:
       # Sanitize name for filesystem use - keep dots for file extensions
@@ -3061,8 +3065,8 @@ class PromptLabSettings(models.Model):
 # never advertised to it at all.
 COURSE_API_KEY_SCOPE_CHOICES = [
     ('read', 'Read only'),
-    ('write', 'Read and write (no deletes, no student email)'),
-    ('admin', 'Full course admin (deletes, resets, student email)'),
+    ('write', 'Read and write (no deletes, no emailing students)'),
+    ('admin', 'Full course admin (deletes, resets, emailing students)'),
 ]
 
 

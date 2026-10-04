@@ -153,6 +153,7 @@ class ErrorClassifierTestCase(TestCase):
             ("  File \"solution.py\", line 2\n    def f(:\nSyntaxError: invalid syntax", 'compile_error'),
             ("Main.java:10: error: cannot find symbol", 'compile_error'),
             ("Failed to extract results: missing markers. Stdout preview: ...", 'marker_extraction'),
+            ("Failed to extract results: missing markers. Stdout preview:  Stderr tail: exec /usr/local/bin/python: argument list too long", 'infra'),
             ("docker: Error response from daemon: image not found", 'infra'),
             ("No executor found for file: main.xyz", 'infra'),
             ("Cache save failed: disk full", 'infra'),
@@ -168,6 +169,21 @@ class ErrorClassifierTestCase(TestCase):
         from autograder.services.error_classifier import classify_error
         self.assertEqual(classify_error(None), ('unknown', ''))
         self.assertEqual(classify_error('   '), ('unknown', ''))
+
+    def test_marker_error_leads_with_real_cause(self):
+        """extract_json_result now puts the last stderr line first, so the sampled
+        message names the cause instead of the generic marker complaint."""
+        from autograder.services.executors.base import NotebookExecutor
+        from autograder.services.error_classifier import classify_error
+        result = NotebookExecutor.extract_json_result(
+            stdout="",
+            stderr="some earlier noise\nexec /usr/local/bin/python: argument list too long\n")
+        assert result.err is not None
+        self.assertTrue(result.err.startswith("exec /usr/local/bin/python: argument list too long\n"))
+        self.assertIn("missing markers", result.err)
+        category, message = classify_error(result.err)
+        self.assertEqual(category, 'infra')
+        self.assertEqual(message, "exec /usr/local/bin/python: argument list too long")
 
     def test_python_traceback_sample_is_last_line(self):
         from autograder.services.error_classifier import classify_error

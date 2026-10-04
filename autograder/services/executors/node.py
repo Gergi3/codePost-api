@@ -90,12 +90,10 @@ class NodeExecutor(Executor):
         if not template:
             return ExecutionResult.error("Failed to get code template")
 
-        # Prepare payload
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        
-        # Command: echo -> wrapper.js -> node wrapper.js
-        cmd_str = f"echo '{template_b64}' | base64 -d > wrapper.js && node wrapper.js"
-        command = ["sh", "-c", cmd_str]
+        # The rendered template is staged into /work as a self-deleting runner
+        # file (never through argv — Linux caps one argument at 128 KiB).
+        runner_filename = ".codepost_runner.js"
+        command = ["node", f"/work/{runner_filename}"]
         
         needs_network = bool(imports)
         
@@ -111,7 +109,8 @@ class NodeExecutor(Executor):
              return ExecutionResult.error("Failed to create container")
              
         self.add_additional_files(container)
-        
+        self._put_file(container, '/work', runner_filename, template)
+
         try:
             container.start()
             adjusted_timeout = timeout + (30 if imports else 0)
@@ -159,6 +158,7 @@ class NodeNotebookExecutor(NotebookExecutor):
     DOCKER_IMAGE = "node:20-slim"
     EXECUTABLE_EXTENSIONS = [".ipynb"]
     EXECUTION_COMMAND = ["node"]
+    RUNNER_FILENAME = ".codepost_runner.js"
     BUILD_CACHE_DIRECTORIES = ['/tmp/npm-cache']
     
     @classmethod
@@ -180,9 +180,3 @@ class NodeNotebookExecutor(NotebookExecutor):
         test_code_b64 = base64.b64encode(test_code.encode('utf-8')).decode('utf-8') if test_code else ""
         template = template.replace('{test_code_b64}', test_code_b64)
         return template
-    
-    def _get_execution_command(self, template: str) -> List[str]:
-        # Node needs the template written to a file first
-        template_b64 = base64.b64encode(template.encode('utf-8')).decode('utf-8')
-        cmd_str = f"echo '{template_b64}' | base64 -d > /tmp/notebook.js && node /tmp/notebook.js"
-        return ["sh", "-c", cmd_str]
