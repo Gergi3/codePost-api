@@ -247,10 +247,21 @@ class Builder:
             # 1. Create Dockerfile
             dockerfile_path = os.path.join(build_dir, 'Dockerfile')
             
-            # Determine language key 
+            # Determine language key
             lang_key = env.language
             if lang_key == 'python3':
                 lang_key = 'python'
+
+            # Java images bake the pinned JUnit/Mockito jars at build time via a
+            # `COPY libs-pom.xml` in the buildSpecs `baseExtra`. Stage that pom into
+            # the build context so the COPY resolves. (Only java-27 declares the
+            # baseExtra today; copying for any java* language is harmless.)
+            if 'java' in env.language.lower():
+                libs_pom_src = os.path.join(
+                    os.path.dirname(__file__), '..', 'testUtils', 'libs-pom.xml'
+                )
+                if os.path.exists(libs_pom_src):
+                    shutil.copy(libs_pom_src, os.path.join(build_dir, 'libs-pom.xml'))
             
             # Write dependencies file to disk if present
             if env.requirements:

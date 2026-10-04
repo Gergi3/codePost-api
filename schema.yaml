@@ -20055,6 +20055,7 @@ components:
       - python-3.7
       - python-2.7
       - java
+      - java-27
       - java-17
       - java-11
       - c/c++
@@ -20063,6 +20064,7 @@ components:
       - r-4
       - ruby
       - php
+      - other
       type: string
       description: |-
         * `python-3.12` - python-3.12
@@ -20071,6 +20073,7 @@ components:
         * `python-3.7` - python-3.7
         * `python-2.7` - python-2.7
         * `java` - java
+        * `java-27` - java-27
         * `java-17` - java-17
         * `java-11` - java-11
         * `c/c++` - c/c++
@@ -20079,6 +20082,7 @@ components:
         * `r-4` - r-4
         * `ruby` - ruby
         * `php` - php
+        * `other` - other
     LastSolutionRunEnum:
       enum:
       - 0

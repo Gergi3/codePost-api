@@ -19,6 +19,11 @@ Skip Docker tests (runs in CI without Docker):
 
 from typing import Any, Dict, List, cast
 
+import os
+import shutil
+import subprocess
+import tempfile
+
 import pytest
 from django.test import SimpleTestCase
 
@@ -469,6 +474,148 @@ class JavaDockerExecutionTests(SimpleTestCase):
         v = TestService.verify_script_test(cast(Any, None), exec_result)
         self.assertTrue(v["passed"])
         self.assertEqual(v["score"], 10)
+
+
+# ###################################################################
+# Java Executor — Real JUnit (java-27 baked image) Docker Tests
+# ###################################################################
+
+
+@skip_no_docker
+class JavaJUnitDockerExecutionTests(SimpleTestCase):
+    """
+    End-to-end JUnit path: builds a java-27-style image with the pinned JUnit/
+    Mockito jars baked into /opt/codepost/libs (once), then runs real JUnit test
+    scripts through JavaExecutor._execute_junit5 in that image.
+    """
+
+    _image_tag = "codepost-junit-test:latest"
+    _image_ready = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from unittest import SkipTest
+        import docker as docker_lib
+
+        if not shutil.which("mvn"):
+            raise SkipTest("mvn not available — cannot bake JUnit libs for the test image")
+
+        build_dir = tempfile.mkdtemp(prefix="codepost-junit-img-")
+        cls._build_dir = build_dir
+        # Resolve the same pinned libs the real image bakes.
+        libs_dir = os.path.join(build_dir, "libs")
+        os.makedirs(libs_dir, exist_ok=True)
+        libs_pom = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "testUtils", "libs-pom.xml")
+        )
+        proc = subprocess.run(
+            ["mvn", "-q", "-f", libs_pom, "dependency:copy-dependencies",
+             f"-DoutputDirectory={libs_dir}"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise SkipTest(f"mvn could not resolve JUnit libs:\n{proc.stderr[-800:]}")
+
+        with open(os.path.join(build_dir, "Dockerfile"), "w") as f:
+            f.write(
+                "FROM eclipse-temurin:27-jdk\n"
+                "RUN useradd -m -d /home/codepost -s /bin/bash codepost\n"
+                "COPY libs /opt/codepost/libs\n"
+                "RUN chmod -R a+rX /opt/codepost\n"
+                "RUN mkdir -m 777 /work\n"
+                "WORKDIR /work\n"
+                "USER codepost\n"
+            )
+        try:
+            client = docker_lib.from_env()
+            client.images.build(path=build_dir, tag=cls._image_tag, rm=True)
+            cls._image_ready = True
+        except Exception as e:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise SkipTest(f"Could not build JUnit test image: {e}")
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            if getattr(cls, "_build_dir", None):
+                shutil.rmtree(cls._build_dir, ignore_errors=True)
+        finally:
+            super().tearDownClass()
+
+    def _execute(self, student_code: str, test_code: str, student_name: str = "Solution.java") -> ExecutionResult:
+        mock_file = _make_mock_file(student_code, name=student_name, extension=".java")
+        executor = JavaExecutor(mock_file, test_code=test_code)
+        # Point at the baked image so the libs guard passes and JUnit is on the classpath.
+        executor.custom_image_name = self._image_tag
+        return executor.execute()
+
+    IMPORTS = (
+        "import org.junit.jupiter.api.Test;\n"
+        "import static org.junit.jupiter.api.Assertions.*;\n"
+    )
+
+    def test_passing_failing_error(self):
+        student = ("public class Solution {\n"
+                   "  public static int add(int a, int b) { return a + b; }\n"
+                   "  public static void boom() { throw new RuntimeException(\"x\"); }\n"
+                   "}\n")
+        test = self.IMPORTS + (
+            "public class SolutionTest {\n"
+            "  @Test void testAdd() { assertEquals(3, Solution.add(1, 2)); }\n"
+            "  @Test void testWrong() { assertEquals(99, Solution.add(1, 2)); }\n"
+            "  @Test void testBoom() { Solution.boom(); }\n"
+            "}\n"
+        )
+        result = self._execute(student, test)
+        self.assertTrue(len(result.tests) == 3,
+                        f"expected 3 tests, got {result.tests}\nstderr:{result.stderr}")
+        by = {t["name"]: t for t in result.tests}
+        self.assertEqual(by["testAdd"]["status"], "passed")
+        self.assertEqual(by["testWrong"]["status"], "failed")
+        self.assertEqual(by["testBoom"]["status"], "error")
+
+    def test_points_from_directive(self):
+        student = "public class Solution { public static boolean ok() { return true; } }\n"
+        test = self.IMPORTS + (
+            "public class SolutionTest {\n"
+            "  // @codepost points=4\n"
+            "  @Test void worthFour() { assertTrue(Solution.ok()); }\n"
+            "}\n"
+        )
+        result = self._execute(student, test)
+        self.assertEqual(len(result.tests), 1)
+        self.assertEqual(result.tests[0]["score"], 4.0)
+        self.assertEqual(result.tests[0]["max_score"], 4.0)
+
+    def test_compile_failure_reports_no_results(self):
+        student = "public class Solution { public void broken(( }\n"  # syntax error
+        test = self.IMPORTS + (
+            "public class SolutionTest {\n"
+            "  @Test void t() { assertTrue(true); }\n"
+            "}\n"
+        )
+        result = self._execute(student, test)
+        self.assertFalse(result.success)
+        self.assertEqual(len(result.tests), 0)
+
+    def test_lab01_reference_against_solution(self):
+        ref = "/Users/I778242/grader/java-course-reference-main-MJT2026/lab-01"
+        test_file = os.path.join(ref, "test", "UniqueSubstringFinderTest.java")
+        sol_file = os.path.join(ref, "src", "UniqueSubstringFinder.java")
+        if not (os.path.exists(test_file) and os.path.exists(sol_file)):
+            from unittest import SkipTest
+            raise SkipTest("lab-01 reference files not present")
+        result = self._execute(
+            open(sol_file).read(),
+            open(test_file).read(),
+            student_name="UniqueSubstringFinder.java",
+        )
+        self.assertEqual(len(result.tests), 10,
+                         f"expected 10 tests, got {len(result.tests)}\nstderr:{result.stderr}")
+        self.assertTrue(all(t["passed"] for t in result.tests),
+                        msg=f"{[(t['name'], t['status']) for t in result.tests if not t['passed']]}")
 
 
 # ###################################################################

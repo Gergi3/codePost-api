@@ -38,7 +38,7 @@ class AutodetectorTest(TestCase):
         
         self.assertTrue(updated)
         self.environment.refresh_from_db()
-        self.assertEqual(self.environment.language, "java-17")
+        self.assertEqual(self.environment.language, "java-27")
 
     def test_no_update_if_auto_detect_false(self):
         self.environment.auto_detect = False

@@ -11,6 +11,14 @@
         "manifest": "pom.xml",
         "manifestInstall": "RUN apk add maven\nCOPY pom.xml /tmp/pom.xml\nRUN mvn -f /tmp/pom.xml dependency:resolve\n"
     },
+    "java-27": {
+        "install": "apt-get install",
+        "base": "FROM eclipse-temurin:27-jdk\nRUN apt-get update && apt-get install -y bash make build-essential python3 maven\n",
+        "baseExtra": "COPY libs-pom.xml /tmp/libs-pom.xml\nRUN mvn -f /tmp/libs-pom.xml dependency:copy-dependencies -DoutputDirectory=/opt/codepost/libs -q && rm -f /tmp/libs-pom.xml && chmod -R a+rX /opt/codepost\n",
+        "useradd": "RUN useradd -m -d /home/codepost -s /bin/bash codepost",
+        "manifest": "pom.xml",
+        "manifestInstall": "COPY pom.xml /tmp/pom.xml\nRUN mvn -f /tmp/pom.xml dependency:resolve\n"
+    },
     "java-17": {
         "install": "apt-get install",
         "base": "FROM eclipse-temurin:17-jdk\nRUN apt-get update && apt-get install -y bash make build-essential python3\n",

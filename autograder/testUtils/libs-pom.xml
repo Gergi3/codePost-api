@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved
+  except as defined by the Rutgers Non-Commercial License, included with this software.
+
+  Single source of truth for the Java autograder's baked test libraries.
+
+  These jars are resolved at IMAGE BUILD time (network available) via
+  `mvn -f libs-pom.xml dependency:copy-dependencies -DoutputDirectory=/opt/codepost/libs`
+  and placed on the runtime classpath ('/opt/codepost/libs/*'), which the sandbox
+  reaches with NO network. To bump a version, edit a single property below and
+  rebuild the environment (the changed file busts the Docker layer cache).
+
+  The junit-bom import keeps every JUnit artifact (jupiter + platform launcher)
+  on one coherent version. byte-buddy / byte-buddy-agent are declared explicitly
+  (not just transitively through Mockito) so the agent jar is guaranteed present
+  for the `-javaagent:` flag the executor passes — Mockito 5's inline mock maker
+  cannot self-attach under the sandbox's no-new-privileges + cap_drop=ALL.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.codepost</groupId>
+  <artifactId>junit-harness-libs</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Bump these to update the baked libraries, then rebuild the environment. -->
+    <junit.version>6.1.3</junit.version>
+    <mockito.version>5.24.0</mockito.version>
+    <bytebuddy.version>1.17.8</bytebuddy.version>
+    <commons.csv.version>1.14.1</commons.csv.version>
+    <opentest4j.version>1.3.0</opentest4j.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Unifies junit-jupiter, junit-platform-launcher, junit-platform-engine, etc. -->
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- JUnit Jupiter API + engine (versions from the BOM). -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+    <!-- The in-process Launcher API used by JUnitPlatformRunner.java. -->
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-launcher</artifactId>
+    </dependency>
+
+    <!-- Mockito (homework assignments). Pulls byte-buddy transitively; we also
+         declare the pieces explicitly below so the agent jar is guaranteed. -->
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+      <version>${mockito.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy</artifactId>
+      <version>${bytebuddy.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy-agent</artifactId>
+      <version>${bytebuddy.version}</version>
+    </dependency>
+
+    <!-- Apache Commons CSV (homework-02 and similar). -->
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-csv</artifactId>
+      <version>${commons.csv.version}</version>
+    </dependency>
+
+    <!-- opentest4j: AssertionFailedError, thrown by Jupiter assertions. -->
+    <dependency>
+      <groupId>org.opentest4j</groupId>
+      <artifactId>opentest4j</artifactId>
+      <version>${opentest4j.version}</version>
+    </dependency>
+  </dependencies>
+</project>

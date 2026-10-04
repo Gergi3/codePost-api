@@ -9,24 +9,27 @@ logger = logging.getLogger(__name__)
 
 class JavaHandler(BaseFileHandler):
     
-    # Common library mapping
+    # Common library mapping. JUnit/Mockito/opentest4j are baked into the java-27
+    # image (autograder/testUtils/libs-pom.xml); versions here match the baked set
+    # so an auto-generated pom can't disagree with the classpath.
     MAPPING = {
-        'org.junit': 'junit:junit:4.13.2',
-        'org.junit.jupiter': 'org.junit.jupiter:junit-jupiter:5.9.2',
-        'org.testng': 'org.testng:testng:7.7.0',
-        'com.google.gson': 'com.google.code.gson:gson:2.10.1',
-        'com.fasterxml.jackson': 'com.fasterxml.jackson.core:jackson-databind:2.15.2',
-        'org.apache.commons.lang3': 'org.apache.commons:commons-lang3:3.12.0',
-        'org.apache.commons.io': 'commons-io:commons-io:2.13.0',
-        'com.google.common': 'com.google.guava:guava:32.1.1-jre',
-        'org.mockito': 'org.mockito:mockito-core:5.4.0',
-        'org.assertj': 'org.assertj:assertj-core:3.24.2',
-        'org.slf4j': 'org.slf4j:slf4j-api:2.0.7',
-        'org.json': 'org.json:json:20230618'
+        'org.junit.jupiter': 'org.junit.jupiter:junit-jupiter:6.1.3',
+        'org.junit': 'org.junit.jupiter:junit-jupiter:6.1.3',
+        'org.testng': 'org.testng:testng:7.10.2',
+        'com.google.gson': 'com.google.code.gson:gson:2.11.0',
+        'com.fasterxml.jackson': 'com.fasterxml.jackson.core:jackson-databind:2.17.1',
+        'org.apache.commons.lang3': 'org.apache.commons:commons-lang3:3.14.0',
+        'org.apache.commons.csv': 'org.apache.commons:commons-csv:1.14.1',
+        'org.apache.commons.io': 'commons-io:commons-io:2.16.1',
+        'com.google.common': 'com.google.guava:guava:33.2.1-jre',
+        'org.mockito': 'org.mockito:mockito-core:5.24.0',
+        'org.assertj': 'org.assertj:assertj-core:3.26.0',
+        'org.slf4j': 'org.slf4j:slf4j-api:2.0.13',
+        'org.json': 'org.json:json:20240303'
     }
 
     def get_language(self) -> str:
-        return 'java-17'
+        return 'java-27'
 
     def is_executable(self) -> bool:
         return True

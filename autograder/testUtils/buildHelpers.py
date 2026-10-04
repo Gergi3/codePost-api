@@ -34,6 +34,13 @@ def createDockerFile(
             else ""
         )
         baseStr = buildSpecs[lookup]["base"].format(updateID=uniqueStr)
+    # Optional base-layer extras that must ALWAYS run for this language, regardless
+    # of per-assignment requirements (e.g. baking JUnit/Mockito jars into the java-27
+    # image). Injected right after the FROM/base layer so it is cached independently
+    # of student dependencies and owned by root before the trailing `USER codepost`.
+    baseExtraStr = ""
+    if lookup in buildSpecs and buildSpecs[lookup].get("baseExtra"):
+        baseExtraStr = buildSpecs[lookup]["baseExtra"]
     _installCmd = buildSpecs[lookup]["install"] if lookup in buildSpecs else None
     userAddCmd = buildSpecs[lookup]["useradd"] if lookup in buildSpecs else ""
 
@@ -95,4 +102,4 @@ def createDockerFile(
         if len(d_stripped) > 0 and not d_stripped.startswith('//') and d_stripped != '...':
             dependencyStr += "RUN {}\n".format(d)
 
-    return baseStr + dirStr + dependencyStr + customDockerFile + "\nWORKDIR /work\nUSER codepost\n"
+    return baseStr + baseExtraStr + dirStr + dependencyStr + customDockerFile + "\nWORKDIR /work\nUSER codepost\n"

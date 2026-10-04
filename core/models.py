@@ -1904,6 +1904,7 @@ class Environment(BaseModel):
       ('python-3.7', 'python-3.7'),
       ('python-2.7', 'python-2.7'),
       ('java', 'java'),
+      ('java-27', 'java-27'),
       ('java-17', 'java-17'),
       ('java-11', 'java-11'),
       ('c/c++', 'c/c++'),

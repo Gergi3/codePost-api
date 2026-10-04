@@ -15,20 +15,26 @@ _DIRECTIVE_PATTERN = re.compile(
     r'(?://|#|--|/\*|\*)\s*@codepost\b(.*?)(?:\*/)?$', re.MULTILINE
 )
 
+# A real JUnit (Jupiter) test script imports org.junit.*; the legacy custom harness
+# (@Test(name=,points=)) never does. Used to pick the Java sub-parser.
+_JUNIT_IMPORT_RE = re.compile(r'^\s*import\s+org\.junit', re.MULTILINE)
+
 
 def _parse_directives(script: str, test_start_pos: int) -> Dict[str, Any]:
     """
     Scan the line(s) immediately before test_start_pos for @codepost directives.
-    Returns parsed directives like {'hidden': True, 'objectives': ['recursion']}.
+    Returns parsed directives like {'hidden': True, 'objectives': ['recursion'], 'points': 2.0}.
     """
     result: Dict[str, Any] = {}
-    # Get the text before the test definition, limited to 3 lines back
+    # Get the text before the test definition, limited to 10 lines back
     preceding = script[:test_start_pos]
     # Take last 500 chars max for efficiency
     preceding = preceding[-500:]
     lines = preceding.rstrip().split('\n')
-    # Check up to 3 lines before
-    for line in reversed(lines[-3:]):
+    # Check up to 10 lines before. The window is wide (and annotation lines are
+    # treated as continuations below) because in JUnit a `// @codepost points=N`
+    # comment usually sits above a stack of annotations (@DisplayName, @Test).
+    for line in reversed(lines[-10:]):
         stripped = line.strip()
         m = _DIRECTIVE_PATTERN.search(stripped)
         if m:
@@ -41,8 +47,16 @@ def _parse_directives(script: str, test_start_pos: int) -> Dict[str, Any]:
             obj_match = re.search(r'objectives\s*=\s*([^\s,]+(?:\s*,\s*[^\s,]+)*)', directive_text)
             if obj_match:
                 result['objectives'] = [o.strip() for o in obj_match.group(1).split(',') if o.strip()]
-        elif stripped and not stripped.startswith(('#', '//', '--', '/*', '*')):
-            # Non-comment, non-empty line — stop scanning
+            pts_match = re.search(r'\bpoints\s*=\s*(\d+(?:\.\d+)?)', directive_text)
+            if pts_match:
+                result['points'] = float(pts_match.group(1))
+            timeout_match = re.search(r'\btimeout\s*=\s*(\d+(?:\.\d+)?)', directive_text)
+            if timeout_match:
+                result['timeout'] = int(float(timeout_match.group(1)))
+        elif stripped and not stripped.startswith(('#', '//', '--', '/*', '*', '@')):
+            # Non-comment, non-annotation, non-empty line — stop scanning.
+            # Java annotation lines (@Test, @DisplayName, @Timeout, ...) are allowed
+            # to sit between the directive comment and the method without stopping us.
             break
     return result
 
@@ -63,7 +77,7 @@ class TestParsingService:
         # Use explicit language if provided, otherwise detect
         if normalized_language.startswith('python') or (not language and "def " in script and "@test" in script):
             return TestParsingService._parse_python(script)
-        elif normalized_language == 'java' or normalized_language.startswith('java-') or (not language and "@Test" in script and "public" in script):
+        elif normalized_language == 'java' or normalized_language.startswith('java-') or (not language and "@Test" in script):
             return TestParsingService._parse_java(script)
         elif normalized_language == 'r' or normalized_language.startswith('r-') or (not language and "run_test(" in script):
             return TestParsingService._parse_r(script)
@@ -129,6 +143,146 @@ class TestParsingService:
 
     @staticmethod
     def _parse_java(script: str) -> List[Dict[str, Any]]:
+        """
+        Dispatch Java test parsing. Real JUnit (Jupiter) scripts import org.junit.*
+        and use bare @Test; the legacy codePost harness uses @Test(name=,points=)
+        with no JUnit import. Prefer JUnit when the import is present, otherwise fall
+        back to the custom-annotation parser.
+        """
+        if _JUNIT_IMPORT_RE.search(script):
+            return TestParsingService._parse_java_junit5(script)
+        return TestParsingService._parse_java_custom(script)
+
+    @staticmethod
+    def _parse_java_junit5(script: str) -> List[Dict[str, Any]]:
+        """
+        Parse a standard JUnit 5/6 (Jupiter) test file. Each method annotated with a
+        bare @Test (or @ParameterizedTest/@RepeatedTest) is one test; functionName is
+        the method name (matches MethodSource.getMethodName() at runtime). @DisplayName
+        becomes the display name; `// @codepost points=N` sets points (default 1.0);
+        lifecycle methods (@BeforeEach etc.) are NOT tests.
+
+        Uses javalang for an accurate AST when available; falls back to a careful
+        regex otherwise. Either way, directives are read from the raw script text so
+        comment placement is honored.
+        """
+        tests = TestParsingService._parse_java_junit5_ast(script)
+        if tests is None:
+            tests = TestParsingService._parse_java_junit5_regex(script)
+        return tests
+
+    _JUNIT_TEST_ANNOTATIONS = {'Test', 'ParameterizedTest', 'RepeatedTest', 'TestFactory', 'TestTemplate'}
+    _JUNIT_LIFECYCLE_ANNOTATIONS = {'BeforeEach', 'AfterEach', 'BeforeAll', 'AfterAll', 'Disabled'}
+
+    @staticmethod
+    def _parse_java_junit5_ast(script: str) -> Optional[List[Dict[str, Any]]]:
+        """AST-based JUnit parse via javalang. Returns None if javalang is unavailable
+        or the source cannot be parsed (caller then uses the regex fallback)."""
+        try:
+            import javalang  # type: ignore[import-untyped]
+        except Exception:
+            return None
+        try:
+            tree = javalang.parse.parse(script)
+        except Exception:
+            return None
+
+        tests: List[Dict[str, Any]] = []
+        seen = set()
+        for _path, node in tree.filter(javalang.tree.MethodDeclaration):
+            ann_names = {a.name for a in (node.annotations or [])}
+            if not (ann_names & TestParsingService._JUNIT_TEST_ANNOTATIONS):
+                continue
+            if ann_names & TestParsingService._JUNIT_LIFECYCLE_ANNOTATIONS:
+                continue
+            fname = node.name
+            if fname in seen:
+                continue
+            seen.add(fname)
+
+            info: Dict[str, Any] = {'functionName': fname, 'name': fname, 'points': 1.0}
+
+            # @DisplayName("...") -> display name
+            for ann in (node.annotations or []):
+                if ann.name == 'DisplayName' and ann.element is not None:
+                    val = getattr(ann.element, 'value', None)
+                    if isinstance(val, str):
+                        info['name'] = val.strip('"')
+
+            # Directives from the comment(s) above the method/annotations.
+            pos = TestParsingService._find_method_pos(script, fname)
+            if pos is not None:
+                info.update(_parse_directives(script, pos))
+
+            tests.append(info)
+        return tests
+
+    @staticmethod
+    def _find_method_pos(script: str, method_name: str) -> Optional[int]:
+        """Char offset at which to scan for directives for a method: the start of the
+        contiguous annotation block directly above the method declaration. Backing up
+        past the annotations (and the method's own line) is required so
+        `_parse_directives` doesn't stop at the non-comment method/annotation lines
+        before reaching a `// @codepost ...` comment placed above the block."""
+        m = re.search(r'\b' + re.escape(method_name) + r'\s*\(', script)
+        if not m:
+            return None
+        lines = script.splitlines(keepends=True)
+        # Find the line index containing the match offset.
+        offset = 0
+        method_line = 0
+        for i, ln in enumerate(lines):
+            if offset + len(ln) > m.start():
+                method_line = i
+                break
+            offset += len(ln)
+        # Walk upward over contiguous annotation lines (@...).
+        start_line = method_line
+        j = method_line - 1
+        while j >= 0 and lines[j].strip().startswith('@'):
+            start_line = j
+            j -= 1
+        return sum(len(lines[k]) for k in range(start_line))
+
+    @staticmethod
+    def _parse_java_junit5_regex(script: str) -> List[Dict[str, Any]]:
+        """Regex fallback for JUnit parsing when javalang is unavailable.
+        Matches a @Test-family annotation (bare, or with args for @ParameterizedTest)
+        followed, possibly across other annotations, by a method declaration."""
+        tests: List[Dict[str, Any]] = []
+        seen = set()
+        # @Test (optionally @Test(...) is NOT the custom form here because this path
+        # only runs for JUnit-import scripts) then any stacked annotations, then the
+        # method signature: [modifiers] <ret> name( ... ) [throws ...]
+        pattern = re.compile(
+            r'@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b[^\n]*'
+            r'(?:\s*@[A-Za-z_][\w.]*(?:\([^)]*\))?[^\n]*)*'   # other stacked annotations
+            r'\s*(?:public\s+|protected\s+|private\s+|static\s+|final\s+)*'
+            r'[\w<>\[\],.\s?]+?\s+'                            # return type
+            r'([A-Za-z_$][\w$]*)\s*\(',                        # method name
+            re.DOTALL,
+        )
+        # Guard: skip matches whose method is actually a lifecycle method. We detect
+        # that by checking the annotation block the match started on.
+        for m in pattern.finditer(script):
+            # Reject if a lifecycle annotation sits in the matched span.
+            span_text = m.group(0)
+            if re.search(r'@(?:BeforeEach|AfterEach|BeforeAll|AfterAll|Disabled)\b', span_text):
+                continue
+            fname = m.group(1)
+            if fname in seen:
+                continue
+            seen.add(fname)
+            info: Dict[str, Any] = {'functionName': fname, 'name': fname, 'points': 1.0}
+            dn = re.search(r'@DisplayName\s*\(\s*"([^"]*)"\s*\)', span_text)
+            if dn:
+                info['name'] = dn.group(1)
+            info.update(_parse_directives(script, m.start()))
+            tests.append(info)
+        return tests
+
+    @staticmethod
+    def _parse_java_custom(script: str) -> List[Dict[str, Any]]:
         # Naive regex parsing for Java @Test
         tests = []
         # Pattern: @Test(name="...", points=5) public <returnType> testName()

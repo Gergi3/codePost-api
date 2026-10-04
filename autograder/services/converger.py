@@ -186,29 +186,41 @@ class JavaConverger(BaseConverger):
         r"package ([\w\.]+) does not exist"
     ]
     STDLIB = {'java', 'javax', 'sun', 'com.sun'}
-    
+
+    # Test/support libraries baked into the java-27 image at /opt/codepost/libs
+    # (see autograder/testUtils/libs-pom.xml). The converger must NOT add these to a
+    # per-assignment pom — doing so could pull a second, conflicting copy onto the
+    # classpath. Treated like stdlib: never converged.
+    BAKED = {
+        'org.junit', 'org.mockito', 'org.opentest4j', 'net.bytebuddy',
+        'org.apache.commons.csv', 'org.hamcrest',
+    }
+
     # Mapping of package prefixes to Maven coordinates
     # Format: prefix -> (groupId, artifactId, version, scope)
+    # NOTE: JUnit/Mockito are baked (see BAKED) and are intentionally absent here so
+    # the converger never re-adds them. Versions kept current for the rest.
     MAVEN_MAPPINGS = {
-        'org.junit': ('junit', 'junit', '4.13.2', 'test'),
-        'com.google.gson': ('com.google.code.gson', 'gson', '2.8.9', None),
-        'org.testng': ('org.testng', 'testng', '7.4.0', 'test'),
-        'org.apache.commons.lang': ('org.apache.commons', 'commons-lang3', '3.12.0', None),
-        'org.apache.commons.io': ('commons-io', 'commons-io', '2.11.0', None),
+        'com.google.gson': ('com.google.code.gson', 'gson', '2.11.0', None),
+        'org.testng': ('org.testng', 'testng', '7.10.2', 'test'),
+        'org.apache.commons.lang': ('org.apache.commons', 'commons-lang3', '3.14.0', None),
+        'org.apache.commons.io': ('commons-io', 'commons-io', '2.16.1', None),
         'org.apache.commons.collections': ('org.apache.commons', 'commons-collections4', '4.4', None),
-        'org.apache.http': ('org.apache.httpcomponents', 'httpclient', '4.5.13', None),
-        'com.fasterxml.jackson': ('com.fasterxml.jackson.core', 'jackson-databind', '2.13.0', None),
-        'org.slf4j': ('org.slf4j', 'slf4j-api', '1.7.32', None),
-        'org.json': ('org.json', 'json', '20210307', None),
-        'org.mockito': ('org.mockito', 'mockito-core', '4.2.0', 'test'),
-        'com.google.guava': ('com.google.guava', 'guava', '31.0.1-jre', None),
+        'org.apache.http': ('org.apache.httpcomponents', 'httpclient', '4.5.14', None),
+        'com.fasterxml.jackson': ('com.fasterxml.jackson.core', 'jackson-databind', '2.17.1', None),
+        'org.slf4j': ('org.slf4j', 'slf4j-api', '2.0.13', None),
+        'org.json': ('org.json', 'json', '20240303', None),
+        'com.google.guava': ('com.google.guava', 'guava', '33.2.1-jre', None),
     }
 
     @classmethod
     def _is_valid_module(cls, module: str) -> bool:
-        """Java packages - check prefix against stdlib."""
+        """Java packages - check prefix against stdlib and baked libraries."""
         for std in cls.STDLIB:
             if module.startswith(std):
+                return False
+        for baked in cls.BAKED:
+            if module == baked or module.startswith(baked):
                 return False
         return len(module) >= 2 and re.match(r'^[\w\.]+$', module) is not None
 

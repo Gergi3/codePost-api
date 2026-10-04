@@ -130,3 +130,119 @@ test("Reverses", 2, "desc", function(){ return 1; }, 30);
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].get("objectives"), ["a", "b"])
         self.assertIs(parsed[0].get("hidden"), True)
+
+
+class JUnit5ParsingTests(SimpleTestCase):
+    """Parsing of real (bare @Test) JUnit Jupiter test scripts."""
+
+    def _parse(self, script: str):
+        category = SimpleNamespace(testScript=script)
+        return TestParsingService.parse_script(category, language="java-27")
+
+    JUNIT_IMPORTS = (
+        "import org.junit.jupiter.api.Test;\n"
+        "import org.junit.jupiter.api.DisplayName;\n"
+        "import org.junit.jupiter.api.BeforeEach;\n"
+        "import static org.junit.jupiter.api.Assertions.*;\n"
+    )
+
+    def test_bare_test_methods_parse_with_method_name(self):
+        script = self.JUNIT_IMPORTS + '''
+public class CalcTest {
+    @Test
+    void testAdd() { assertEquals(3, 1 + 2); }
+
+    @Test
+    public void testSub() throws Exception { assertEquals(1, 2 - 1); }
+}
+'''
+        parsed = self._parse(script)
+        by = {t["functionName"]: t for t in parsed}
+        self.assertEqual(set(by), {"testAdd", "testSub"})
+        self.assertTrue(all(t["points"] == 1.0 for t in parsed))
+        # name defaults to the method name when there is no @DisplayName
+        self.assertEqual(by["testAdd"]["name"], "testAdd")
+
+    def test_lifecycle_methods_are_not_tests(self):
+        script = self.JUNIT_IMPORTS + '''
+public class LifecycleTest {
+    @BeforeEach
+    void setUp() {}
+
+    @AfterEach
+    void tearDown() {}
+
+    @Test
+    void realTest() { assertTrue(true); }
+}
+'''
+        parsed = self._parse(script)
+        self.assertEqual([t["functionName"] for t in parsed], ["realTest"])
+
+    def test_display_name_becomes_name(self):
+        script = self.JUNIT_IMPORTS + '''
+public class DnTest {
+    @DisplayName("Adds two numbers")
+    @Test
+    void testAdd() { assertEquals(3, 1 + 2); }
+}
+'''
+        parsed = self._parse(script)
+        self.assertEqual(parsed[0]["functionName"], "testAdd")
+        self.assertEqual(parsed[0]["name"], "Adds two numbers")
+
+    def test_codepost_points_directive_above_stacked_annotations(self):
+        # The directive sits ABOVE @DisplayName and @Test — the earlier bug stopped
+        # scanning at the first annotation line and lost it.
+        script = self.JUNIT_IMPORTS + '''
+public class PointsTest {
+    // @codepost points=2.5
+    @DisplayName("Weighted")
+    @Test
+    void testWeighted() { assertTrue(true); }
+
+    @Test
+    void testDefault() { assertTrue(true); }
+}
+'''
+        by = {t["functionName"]: t for t in self._parse(script)}
+        self.assertEqual(by["testWeighted"]["points"], 2.5)
+        self.assertEqual(by["testWeighted"]["name"], "Weighted")
+        self.assertEqual(by["testDefault"]["points"], 1.0)
+
+    def test_codepost_hidden_and_points_together(self):
+        script = self.JUNIT_IMPORTS + '''
+public class HiddenTest {
+    // @codepost hidden points=3
+    @Test
+    void secret() { assertTrue(true); }
+}
+'''
+        t = self._parse(script)[0]
+        self.assertIs(t.get("hidden"), True)
+        self.assertEqual(t["points"], 3.0)
+
+    def test_junit_import_routes_to_junit5_not_custom(self):
+        # A JUnit import must select the Jupiter parser even though the custom
+        # parser also keys off "@Test".
+        script = self.JUNIT_IMPORTS + '''
+public class RouteTest {
+    @Test
+    void onlyBareTest() { assertTrue(true); }
+}
+'''
+        parsed = self._parse(script)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["functionName"], "onlyBareTest")
+
+    def test_legacy_custom_form_without_junit_import_still_parses(self):
+        # No org.junit import -> custom @Test(name=,points=) parser.
+        script = '''
+@Test(name="Legacy", points=5)
+public double legacyTest() { return 5.0; }
+'''
+        category = SimpleNamespace(testScript=script)
+        parsed = TestParsingService.parse_script(category, language="java-27")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["name"], "Legacy")
+        self.assertEqual(parsed[0]["points"], 5)

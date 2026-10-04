@@ -28,16 +28,17 @@ class FileHandlerTests(SimpleTestCase):
         f = File(name="Test.java", extension="java", data="import java.util.List;")
         handler = FileHandlerFactory.get_handler(f)
         self.assertIsInstance(handler, JavaHandler)
-        self.assertEqual(handler.get_language(), "java-17")
+        self.assertEqual(handler.get_language(), "java-27")
 
     def test_java_requirements_pom(self):
-        # Test pom generation from imports
-        code = "import org.junit.Test;"
+        # Test pom generation from imports. org.junit now maps to the baked
+        # JUnit 5/6 Jupiter artifact (not legacy junit:junit 4).
+        code = "import org.junit.jupiter.api.Test;"
         f = File(name="Test.java", extension="java", data=code)
         handler = FileHandlerFactory.get_handler(f)
         reqs = handler.get_requirements()
-        self.assertIn("<groupId>junit</groupId>", reqs)
-        self.assertIn("<artifactId>junit</artifactId>", reqs)
+        self.assertIn("<groupId>org.junit.jupiter</groupId>", reqs)
+        self.assertIn("<artifactId>junit-jupiter</artifactId>", reqs)
 
     def test_node_requirements(self):
         code = "import axios from 'axios';"

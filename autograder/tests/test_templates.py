@@ -691,6 +691,24 @@ class TemplateStructuralTests(SimpleTestCase):
         self.assertIn("@interface Test", src)
         self.assertIn("@Retention", src)
 
+    def test_junit_platform_runner_has_required_elements(self):
+        src = _read_template("JUnitPlatformRunner.java")
+        # Output protocol markers the autograder parses.
+        self.assertIn("TEST_RESULT_JSON_START", src)
+        self.assertIn("TEST_RESULT_JSON_END", src)
+        # Launcher API + classpath discovery of the compiled 'out' dir.
+        self.assertIn("selectClasspathRoots", src)
+        self.assertIn("LauncherFactory", src)
+        self.assertIn("TestExecutionListener", src)
+        # Per-test timeout isolation so one hung test can't lose the whole suite.
+        self.assertIn("junit.jupiter.execution.timeout.testable.method.default", src)
+        # Injected points map + default timeout placeholders.
+        self.assertIn("#{POINTS_JSON}", src)
+        self.assertIn("#{DEFAULT_TIMEOUT}", src)
+        # Required result fields for parse_test_results.
+        for field in ("name", "score", "max_score", "passed", "status", "error"):
+            self.assertIn(field, src, f"JUnitPlatformRunner missing field {field}")
+
     def test_cpp_template_has_test_macros(self):
         src = _read_template("template.cpp")
         self.assertIn("#define TEST(", src)
@@ -1950,6 +1968,176 @@ class JavaTemplateRoundTripTests(SimpleTestCase):
         v = TestService.verify_script_test(cast(Any, None), exec_result)
         self.assertTrue(v["passed"])
         self.assertEqual(v["score"], 10)
+
+
+# ###################################################################
+# PART B6b — Real JUnit (JUnitPlatformRunner) round-trip execution
+# ###################################################################
+
+class JUnitPlatformRunnerRoundTripTests(SimpleTestCase):
+    """
+    Resolves the pinned JUnit/Mockito jars (via libs-pom.xml + mvn), compiles a
+    student class + an UNMODIFIED JUnit test + the real JUnitPlatformRunner.java
+    (rendered through the executor's own helpers), runs it, and verifies the
+    emitted JSON — the whole JUnit path short of Docker.
+    """
+
+    _libs_dir = None  # resolved once per class
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from unittest import SkipTest
+        for tool in ("javac", "java", "mvn"):
+            if not shutil.which(tool):
+                raise SkipTest(f"{tool} not available — skipping JUnit runner round-trip")
+        # Resolve the baked libs once into a shared temp dir.
+        libs_pom = os.path.join(TEMPLATES_DIR, "..", "..", "testUtils", "libs-pom.xml")
+        libs_pom = os.path.abspath(libs_pom)
+        cls._libs_dir = tempfile.mkdtemp(prefix="codepost-junit-libs-")
+        proc = subprocess.run(
+            ["mvn", "-q", "-f", libs_pom, "dependency:copy-dependencies",
+             f"-DoutputDirectory={cls._libs_dir}"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            shutil.rmtree(cls._libs_dir, ignore_errors=True)
+            cls._libs_dir = None
+            raise SkipTest(
+                "Could not resolve JUnit libs via mvn (offline?). "
+                f"stderr tail:\n{proc.stderr[-800:]}"
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._libs_dir:
+            shutil.rmtree(cls._libs_dir, ignore_errors=True)
+        super().tearDownClass()
+
+    def _render_runner(self, test_code: str, points_by_fn: dict, default_timeout: int = 30) -> str:
+        """Render JUnitPlatformRunner.java exactly as JavaExecutor._execute_junit5 does."""
+        src = _read_template("JUnitPlatformRunner.java")
+        put_lines = "\n        ".join(
+            f'm.put({json.dumps(str(fn))}, {float(pts)});' for fn, pts in points_by_fn.items()
+        )
+        src = src.replace("#{POINTS_JSON}", put_lines)
+        src = src.replace("#{DEFAULT_TIMEOUT}", f"{int(default_timeout)}s")
+        return src
+
+    def _run(self, student_code: str, student_name: str, test_code: str,
+             points_by_fn: dict, agent: bool = False):
+        """Compile student + test + runner against the libs, run, return parsed results."""
+        libs_glob = os.path.join(self._libs_dir, "*")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, student_name), "w") as f:
+                f.write(student_code)
+            # Name the test file after its public class.
+            from autograder.services.executors.java import JavaExecutor
+            test_name = JavaExecutor._test_class_filename(test_code)
+            with open(os.path.join(tmpdir, test_name), "w") as f:
+                f.write(test_code)
+            with open(os.path.join(tmpdir, "JUnitPlatformRunner.java"), "w") as f:
+                f.write(self._render_runner(test_code, points_by_fn))
+
+            os.makedirs(os.path.join(tmpdir, "out"), exist_ok=True)
+            sources = [os.path.join(tmpdir, n) for n in os.listdir(tmpdir) if n.endswith(".java")]
+            compile_proc = subprocess.run(
+                ["javac", "-cp", libs_glob, "-d", "out", *sources],
+                capture_output=True, text=True, timeout=120, cwd=tmpdir,
+            )
+            if compile_proc.returncode != 0:
+                return None, "", compile_proc.stderr
+
+            run_cmd = ["java", "-ea"]
+            if agent:
+                import glob as _glob
+                agents = _glob.glob(os.path.join(self._libs_dir, "byte-buddy-agent-*.jar"))
+                if agents:
+                    run_cmd.append(f"-javaagent:{agents[0]}")
+            run_cmd += ["-cp", f"{libs_glob}:out", "JUnitPlatformRunner"]
+            run_proc = subprocess.run(
+                run_cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir,
+            )
+            _, _, results = Executor.parse_test_results(run_proc.stdout, run_proc.stderr)
+            return results, run_proc.stdout, run_proc.stderr
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    IMPORTS = (
+        "import org.junit.jupiter.api.Test;\n"
+        "import static org.junit.jupiter.api.Assertions.*;\n"
+    )
+
+    def test_pass_fail_and_error_statuses(self):
+        student = "public class Calc { public static int add(int a,int b){return a+b;} "\
+                  "public static void boom(){ throw new RuntimeException(\"x\"); } }"
+        test = self.IMPORTS + """
+public class CalcTest {
+    @Test void testAdd() { assertEquals(3, Calc.add(1, 2)); }
+    @Test void testWrong() { assertEquals(99, Calc.add(1, 2)); }
+    @Test void testBoom() { Calc.boom(); }
+}
+"""
+        points = {"testAdd": 1.0, "testWrong": 1.0, "testBoom": 1.0}
+        results, out, err = self._run(student, "Calc.java", test, points)
+        self.assertIsNotNone(results, f"compile failed:\n{err}")
+        by = {r["name"]: r for r in results}
+        self.assertEqual(set(by), {"testAdd", "testWrong", "testBoom"})
+        self.assertEqual(by["testAdd"]["status"], "passed")
+        self.assertTrue(by["testAdd"]["passed"])
+        self.assertEqual(by["testWrong"]["status"], "failed")   # AssertionError
+        self.assertEqual(by["testBoom"]["status"], "error")     # RuntimeException
+
+    def test_points_drive_score(self):
+        student = "public class P { public static boolean ok(){return true;} }"
+        test = self.IMPORTS + """
+public class PTest {
+    @Test void worthThree() { assertTrue(P.ok()); }
+    @Test void worthOneFails() { assertTrue(false); }
+}
+"""
+        points = {"worthThree": 3.0, "worthOneFails": 1.0}
+        results, out, err = self._run(student, "P.java", test, points)
+        self.assertIsNotNone(results, f"compile failed:\n{err}")
+        by = {r["name"]: r for r in results}
+        self.assertEqual(by["worthThree"]["score"], 3.0)
+        self.assertEqual(by["worthThree"]["max_score"], 3.0)
+        self.assertEqual(by["worthOneFails"]["score"], 0)
+        self.assertEqual(by["worthOneFails"]["max_score"], 1.0)
+
+    def test_assertThrows_passes(self):
+        # assertThrows is a core reason to run real JUnit instead of the custom harness.
+        student = "public class Thrower { public static void f(){ throw new IllegalArgumentException(); } }"
+        test = self.IMPORTS + """
+public class ThrowerTest {
+    @Test void throwsIAE() {
+        assertThrows(IllegalArgumentException.class, () -> Thrower.f());
+    }
+}
+"""
+        results, out, err = self._run(student, "Thrower.java", test, {"throwsIAE": 1.0})
+        self.assertIsNotNone(results, f"compile failed:\n{err}")
+        self.assertTrue(results[0]["passed"])
+
+    def test_lab01_reference_test_against_correct_solution(self):
+        # The real lab-01 reference test, unmodified, against a correct solution.
+        ref = "/Users/I778242/grader/java-course-reference-main-MJT2026/lab-01"
+        test_file = os.path.join(ref, "test", "UniqueSubstringFinderTest.java")
+        sol_file = os.path.join(ref, "src", "UniqueSubstringFinder.java")
+        if not (os.path.exists(test_file) and os.path.exists(sol_file)):
+            from unittest import SkipTest
+            raise SkipTest("lab-01 reference files not present")
+        student = open(sol_file).read()
+        test = open(test_file).read()
+        from autograder.services.TestParsingService import TestParsingService
+        points = {t["functionName"]: t.get("points", 1.0)
+                  for t in TestParsingService._parse_java(test)}
+        results, out, err = self._run(student, "UniqueSubstringFinder.java", test, points)
+        self.assertIsNotNone(results, f"compile failed:\n{err}")
+        self.assertEqual(len(results), 10)
+        self.assertTrue(all(r["passed"] for r in results),
+                        msg=f"not all passed: {[(r['name'], r['status']) for r in results]}")
 
 
 # ###################################################################
