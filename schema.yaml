@@ -15240,6 +15240,273 @@ paths:
               schema:
                 $ref: '#/components/schemas/TestCategory'
           description: ''
+  /testCategoryFiles/:
+    get:
+      operationId: testCategoryFiles_list
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      tags:
+      - testCategoryFiles
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TestCategoryFile'
+          description: ''
+    post:
+      operationId: testCategoryFiles_create
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      tags:
+      - testCategoryFiles
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+        required: true
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCategoryFile'
+          description: ''
+  /testCategoryFiles/{id}/:
+    get:
+      operationId: testCategoryFiles_retrieve
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this test category file.
+        required: true
+      tags:
+      - testCategoryFiles
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCategoryFile'
+          description: ''
+    put:
+      operationId: testCategoryFiles_update
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this test category file.
+        required: true
+      tags:
+      - testCategoryFiles
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TestCategoryFile'
+        required: true
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCategoryFile'
+          description: ''
+    patch:
+      operationId: testCategoryFiles_partialUpdate
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this test category file.
+        required: true
+      tags:
+      - testCategoryFiles
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedTestCategoryFile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedTestCategoryFile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedTestCategoryFile'
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCategoryFile'
+          description: ''
+    delete:
+      operationId: testCategoryFiles_destroy
+      description: |-
+        list:
+        Return a list of all the testCategoryFiles.
+
+        create:
+        Create a new testCategoryFile.
+
+        retrieve:
+        Return the given testCategoryFile.
+
+        update:
+        Update a testCategoryFile.
+
+        partial_update:
+        Update a testCategoryFile.
+
+        delete:
+        Delete a testCategoryFile.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this test category file.
+        required: true
+      tags:
+      - testCategoryFiles
+      security:
+      - courseKeyAuth: []
+      - tokenAuth: []
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: No response body
   /testCategoryResources/:
     get:
       operationId: testCategoryResources_list
@@ -23199,6 +23466,33 @@ components:
           items:
             $ref: '#/components/schemas/TestCategoryResource'
           readOnly: true
+        testFiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestCategoryFile'
+          readOnly: true
+    PatchedTestCategoryFile:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        category:
+          type: integer
+          description: The related test category.
+        name:
+          type: string
+          description: File name, e.g. 'FooTest.java'.
+          maxLength: 255
+        content:
+          type: string
+          description: The file's source contents.
+        sortKey:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: -9223372036854775808
+          format: int64
+          description: Integer to specify display order.
     PatchedTestCategoryResource:
       type: object
       properties:
@@ -27156,12 +27450,44 @@ components:
           items:
             $ref: '#/components/schemas/TestCategoryResource'
           readOnly: true
+        testFiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestCategoryFile'
+          readOnly: true
       required:
       - assignment
       - id
       - name
       - resources
       - testCases
+      - testFiles
+    TestCategoryFile:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        category:
+          type: integer
+          description: The related test category.
+        name:
+          type: string
+          description: File name, e.g. 'FooTest.java'.
+          maxLength: 255
+        content:
+          type: string
+          description: The file's source contents.
+        sortKey:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: -9223372036854775808
+          format: int64
+          description: Integer to specify display order.
+      required:
+      - category
+      - id
+      - name
     TestCategoryResource:
       type: object
       properties:

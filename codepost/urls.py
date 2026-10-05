@@ -38,6 +38,7 @@ from core.views.submissionTest import SubmissionTestViewSet
 from core.views.testCase import TestCaseViewSet
 from core.views.testCategory import TestCategoryViewSet
 from core.views.testCategoryResource import TestCategoryResourceViewSet
+from core.views.testCategoryFile import TestCategoryFileViewSet
 from core.views.learningObjective import LearningObjectiveViewSet
 from core.views.assignmentDataSet import AssignmentDataSetViewSet
 from core.views.studentDataSetAssignment import StudentDataSetAssignmentViewSet
@@ -119,6 +120,7 @@ router.register(r'courseFiles', CourseFileViewSet)
 router.register(r'testCases', TestCaseViewSet)
 router.register(r'testCategories', TestCategoryViewSet)
 router.register(r'testCategoryResources', TestCategoryResourceViewSet)
+router.register(r'testCategoryFiles', TestCategoryFileViewSet)
 router.register(r'learningObjectives', LearningObjectiveViewSet)
 router.register(r'submissionTests', SubmissionTestViewSet)
 router.register(r'webhooks', WebhookViewSet)

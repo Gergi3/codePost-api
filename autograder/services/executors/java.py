@@ -152,25 +152,43 @@ class JavaExecutor(Executor):
         # 1. Clean the test code and pull per-test timeouts out of the sentinel.
         timeout_map = self._extract_timeout_map(raw_test_code)
         test_code = self._strip_timeouts_sentinel(raw_test_code)
-        if not test_code.strip():
+
+        # Resolve the set of test files to stage. Prefer the category's test files
+        # (multi-file categories) passed via self.test_files; fall back to the
+        # single stripped test_code for legacy single-script categories.
+        if self.test_files:
+            test_files = [
+                {'name': f['name'], 'content': f['content']}
+                for f in self.test_files if (f.get('content') or '').strip()
+            ]
+        elif test_code.strip():
+            test_files = [{'name': self._test_class_filename(test_code), 'content': test_code}]
+        else:
+            test_files = []
+        if not test_files:
             return ExecutionResult.error("JUnit test script is empty")
 
-        # 2. Points come from the parsed script; the runner emits score=points on
-        #    pass, 0 on fail. TestParsingService supplies points via directives.
-        from autograder.services.TestParsingService import TestParsingService
-        try:
-            parsed = TestParsingService._parse_java(test_code)
-        except Exception:
-            parsed = []
-        points_by_function = {
-            t['functionName']: t.get('points', 1.0) for t in parsed if t.get('functionName')
-        }
+        # 2. Points: prefer the DB-owned map (functionName -> points) supplied by
+        #    TestService; fall back to re-parsing when absent (e.g. ad-hoc runs).
+        if self.points_by_function:
+            points_by_function = dict(self.points_by_function)
+        else:
+            from autograder.services.TestParsingService import TestParsingService
+            points_by_function = {}
+            for tf in test_files:
+                try:
+                    for t in TestParsingService._parse_java(tf['content']):
+                        if t.get('functionName'):
+                            points_by_function[t['functionName']] = t.get('points', 1.0)
+                except Exception:
+                    pass
 
         # 3. Co-compilation guard: a student file must not redefine a test class or
-        #    shadow framework packages. Reject before compiling (fail loud, not silent).
-        guard_err = self._junit_cocompile_guard(code, self.file.name or "Main.java", test_code)
-        if guard_err:
-            return ExecutionResult.error(guard_err)
+        #    shadow framework packages. Checked against every test file.
+        for tf in test_files:
+            guard_err = self._junit_cocompile_guard(code, self.file.name or "Main.java", tf['content'])
+            if guard_err:
+                return ExecutionResult.error(guard_err)
 
         default_timeout_s = max([30] + [int(v) for v in timeout_map.values() if v])
         runner = self._render_junit_runner(points_by_function, default_timeout_s)
@@ -204,9 +222,10 @@ class JavaExecutor(Executor):
 
         runner_files = {
             source_relative_path: code,
-            self._test_class_filename(test_code): test_code,
             "JUnitPlatformRunner.java": runner,
         }
+        for tf in test_files:
+            runner_files[tf['name']] = tf['content']
 
         libs = "/opt/codepost/libs/*"
         cmd_str = (

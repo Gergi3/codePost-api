@@ -1,8 +1,9 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from autograder.services.TestParsingService import TestParsingService
 from core.services.ai_service import AIService
@@ -55,8 +56,11 @@ class TestParsingServiceAlignmentTests(SimpleTestCase):
         self.assertEqual(parsed[0]["name"], "Test Name")
 
     def test_update_test_cases_uses_assignment_environment_language(self):
+        # update_test_cases parses each of the category's files via parse_script,
+        # passing the assignment's environment language through.
         category = SimpleNamespace(
-            testScript=AIService.LANGUAGE_EXAMPLES["java"],
+            testScript='@Test(name="X", points=1) public void x() {}',
+            testFiles=SimpleNamespace(all=lambda: []),
             assignment=SimpleNamespace(environment=SimpleNamespace(language="java-17")),
             testCases=SimpleNamespace(all=lambda: []),
             pk=123,
@@ -68,7 +72,10 @@ class TestParsingServiceAlignmentTests(SimpleTestCase):
 
             TestParsingService.update_test_cases(category)
 
-        parse_mock.assert_called_once_with(category, language="java-17")
+        # parse_script is called once (for the single legacy-script source) with the
+        # environment language threaded through.
+        self.assertEqual(parse_mock.call_count, 1)
+        self.assertEqual(parse_mock.call_args.kwargs.get("language"), "java-17")
 
     def test_python_positional_points_are_parsed(self):
         script = '''
@@ -246,3 +253,100 @@ public double legacyTest() { return 5.0; }
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["name"], "Legacy")
         self.assertEqual(parsed[0]["points"], 5)
+
+
+class HumanizeTests(SimpleTestCase):
+    def test_camel_and_pascal_split_preserve_casing(self):
+        h = TestParsingService._humanize
+        self.assertEqual(h("thisIsAPascalCaseTest"), "This Is A Pascal Case Test")
+        self.assertEqual(h("testEmptyArray"), "Test Empty Array")
+
+    def test_acronyms_preserved(self):
+        self.assertEqual(TestParsingService._humanize("parseHTTPResponse"), "Parse HTTP Response")
+
+    def test_snake_case_title_cased(self):
+        self.assertEqual(TestParsingService._humanize("snake_case_name"), "Snake Case Name")
+
+
+class JUnitSyncTests(TestCase):
+    """DB-backed tests for update_test_cases: multi-file, DB-points preservation."""
+
+    JUNIT = (
+        "import org.junit.jupiter.api.Test;\n"
+        "public class {cls} {{\n"
+        "  @Test void {m1}() {{}}\n"
+        "  @Test void {m2}() {{}}\n"
+        "}}\n"
+    )
+
+    def _category(self):
+        from core.tests.factories import TestCategoryFactory
+        return TestCategoryFactory(name="Functional")
+
+    def test_multi_file_aggregates_and_defaults(self):
+        from core.models import TestCategoryFile
+        cat = self._category()
+        TestCategoryFile.objects.create(
+            category=cat, name="FooTest.java",
+            content=self.JUNIT.format(cls="FooTest", m1="thisIsAPascalCaseTest", m2="testEmptyArray"),
+            sortKey=0)
+        TestCategoryFile.objects.create(
+            category=cat, name="BarTest.java",
+            content=self.JUNIT.format(cls="BarTest", m1="barOnly", m2="alsoBar"), sortKey=1)
+
+        by = {t.functionName: t for t in cat.testCases.all()}
+        self.assertEqual(set(by), {"thisIsAPascalCaseTest", "testEmptyArray", "barOnly", "alsoBar"})
+        self.assertTrue(all(t.pointsPass == Decimal("1.00") for t in by.values()))
+        # humanized default description, casing preserved
+        self.assertEqual(by["thisIsAPascalCaseTest"].description, "This Is A Pascal Case Test")
+        cat.refresh_from_db()
+        self.assertEqual(cat.maxPoints, Decimal("4.00"))
+
+    def test_resync_preserves_db_points_and_description(self):
+        from core.models import TestCategoryFile
+        cat = self._category()
+        f = TestCategoryFile.objects.create(
+            category=cat, name="FooTest.java",
+            content=self.JUNIT.format(cls="FooTest", m1="alpha", m2="beta"), sortKey=0)
+
+        t = cat.testCases.get(functionName="beta")
+        t.pointsPass = Decimal("5.00")
+        t.description = "My Custom Name"
+        t.hidden = True
+        t.save()
+
+        # Re-saving the file re-syncs; instructor-owned fields must survive.
+        f.save()
+        t.refresh_from_db()
+        self.assertEqual(t.pointsPass, Decimal("5.00"))
+        self.assertEqual(t.description, "My Custom Name")
+        self.assertTrue(t.hidden)
+        cat.refresh_from_db()
+        self.assertEqual(cat.maxPoints, Decimal("6.00"))  # 5 + 1
+
+    def test_stale_test_deleted_when_removed_from_file(self):
+        from core.models import TestCategoryFile
+        cat = self._category()
+        f = TestCategoryFile.objects.create(
+            category=cat, name="FooTest.java",
+            content=self.JUNIT.format(cls="FooTest", m1="keep", m2="drop"), sortKey=0)
+        self.assertEqual(cat.testCases.count(), 2)
+
+        f.content = (
+            "import org.junit.jupiter.api.Test;\n"
+            "public class FooTest {\n  @Test void keep() {}\n}\n"
+        )
+        f.save()
+        self.assertEqual(
+            sorted(t.functionName for t in cat.testCases.all()), ["keep"])
+
+    def test_legacy_testscript_fallback(self):
+        """A category with no testFiles still parses the legacy testScript."""
+        from core.models import TestCategory
+        cat = self._category()
+        # TestCategoryFactory mutes post_save, so set the script then sync manually.
+        cat.testScript = self.JUNIT.format(cls="LegacyTest", m1="one", m2="two")
+        cat.save(update_fields=["testScript"])
+        TestParsingService.update_test_cases(cat)
+        self.assertEqual(
+            sorted(t.functionName for t in cat.testCases.all()), ["one", "two"])

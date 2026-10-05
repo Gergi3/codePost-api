@@ -493,9 +493,55 @@ class TestParsingService:
         return tests
 
     @staticmethod
+    def _iter_category_sources(test_category: TestCategory):
+        """Yield (filename, source) for every test file in the category.
+
+        Prefers the TestCategoryFile rows (multi-file categories); falls back to
+        the legacy single `testScript` field when no files exist."""
+        files = list(getattr(test_category, 'testFiles').all()) if hasattr(test_category, 'testFiles') else []
+        if files:
+            for f in files:
+                if (f.content or "").strip():
+                    yield (f.name, f.content)
+            return
+        script = test_category.testScript or ""
+        if script.strip():
+            yield ("", script)
+
+    @staticmethod
+    def _humanize(name: str) -> str:
+        """Turn a method name into a readable title without destroying casing.
+
+        snake_case and camelCase/PascalCase are split on boundaries; existing
+        capitalization (incl. acronyms) is preserved — unlike str.title(), which
+        lowercases the tail of each word (thisIsAPascalCaseTest -> Thisisa...).
+        """
+        if not name:
+            return name
+        s = name.replace('_', ' ')
+        # Insert a space before each run of capitals and before caps that start a
+        # new word, so 'thisIsAPascalCaseTest' -> 'this Is A Pascal Case Test' and
+        # 'parseHTTPResponse' -> 'parse HTTP Response'.
+        s = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', s)
+        s = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', s)
+        s = re.sub(r'\s+', ' ', s).strip()
+        # Capitalize the first letter of each word, but only touch words that are
+        # entirely lower-case — this title-cases snake_case ('snake case name' ->
+        # 'Snake Case Name') while leaving acronyms and inner caps intact
+        # ('HTTP', 'isA' stay as-is).
+        words = [w[:1].upper() + w[1:] if w.islower() else w for w in s.split(' ')]
+        return ' '.join(words)
+
+    @staticmethod
     def update_test_cases(test_category: TestCategory):
         """
-        Sync execution of parse_script with the database TestCase objects.
+        Sync parsed tests with the DB TestCase objects for a category.
+
+        Points, description and hidden are instructor-owned (edited in the UI and
+        stored on TestCase); this sync therefore PRESERVES those fields on existing
+        tests and only sets defaults when creating a new test. It still deletes
+        tests whose functionName no longer appears in any of the category's files,
+        and recomputes maxPoints as the sum of the DB pointsPass values.
         """
         language = None
         try:
@@ -506,82 +552,85 @@ class TestParsingService:
 
         assignment = test_category.assignment
 
-        logger.info(f"[TestParsingService] Syncing test cases for TestCategory {test_category.pk} (language={language})")
-        parsed_tests = TestParsingService.parse_script(test_category, language=language)
-        logger.info(f"[TestParsingService] Parsed {len(parsed_tests)} tests from script")
+        # Parse @Test methods from every file in the category (multi-file aware).
+        parsed_tests = []
+        for _fname, source in TestParsingService._iter_category_sources(test_category):
+            mock = TestCategory(testScript=source)
+            try:
+                parsed_tests.extend(TestParsingService.parse_script(mock, language=language))
+            except Exception as e:
+                logger.error(f"[TestParsingService] Failed to parse a test file: {e}")
+
+        logger.info(f"[TestParsingService] Syncing TestCategory {test_category.pk} "
+                    f"(language={language}, parsed={len(parsed_tests)})")
 
         if not parsed_tests:
-            logger.warning(f"[TestParsingService] No tests parsed for TestCategory {test_category.pk}. "
-                           f"Script empty={not test_category.testScript}")
+            logger.warning(f"[TestParsingService] No tests parsed for TestCategory {test_category.pk}.")
             return
 
-        # Get existing tests (keyed by functionName to match script source)
         current_tests = {t.functionName: t for t in test_category.testCases.all() if t.functionName}
         parsed_fnames = set()
-
-        # Max length for the description CharField
         desc_max_length = TestCase._meta.get_field('description').max_length or 255
-        
+
         for test_data in parsed_tests:
             fname = test_data['functionName']
+            if fname in parsed_fnames:
+                # Duplicate functionName across files in one category — keep the
+                # first and warn (collision; author should rename or we'd grade one).
+                logger.warning(f"[TestParsingService] Duplicate test functionName '{fname}' "
+                               f"in category {test_category.pk}; keeping the first occurrence.")
+                continue
             parsed_fnames.add(fname)
-            
-            # Prepare fields
-            description = test_data.get('name', fname)
-            if description == fname:
-                description = fname.replace('_', ' ').title()
-            
-            # Truncate description to model max_length
-            description = description[:desc_max_length]
-            explanation = test_data.get('description', "")
 
             try:
                 if fname in current_tests:
-                    # Update existing
-                    t = current_tests[fname]
-                    t.description = description
-                    t.explanation = explanation
-                    t.pointsPass = test_data.get('points', 0)
-                    t.timeout = test_data.get('timeout', 30)
-                    t.hidden = test_data.get('hidden', False)
-                    t.save()
-                    logger.info(f"[TestParsingService] Updated test case: {fname}")
-
-                    # Sync learning objectives
-                    TestParsingService._sync_test_objectives(t, test_data, assignment)
+                    # Existing test: preserve instructor-owned fields (pointsPass,
+                    # description, hidden, explanation). Nothing to update here —
+                    # the script no longer owns points/names.
+                    TestParsingService._sync_test_objectives(current_tests[fname], test_data, assignment)
                 else:
-                    # Create new
+                    # New test: seed a readable default description and 1 point.
+                    # Prefer a real @DisplayName (parser sets name != functionName);
+                    # otherwise humanize the method name (don't show it raw).
+                    parsed_name = test_data.get('name')
+                    if parsed_name and parsed_name != fname:
+                        display = parsed_name
+                    else:
+                        display = TestParsingService._humanize(fname)
+                    # Seed initial points from the parsed script. For JUnit bare @Test
+                    # the parser has no points annotation → defaults to 1.0; for Python
+                    # @test(points=5) or legacy Java @Test(points=5) we honour the value.
+                    # After first create the instructor can override via the UI (PATCH)
+                    # and those edits are preserved by the existing-test branch above.
+                    initial_points = float(test_data.get('points') or 1.0)
                     t = TestCase.objects.create(
                         testCategory=test_category,
                         functionName=fname,
-                        description=description,
-                        explanation=explanation,
-                        pointsPass=test_data.get('points', 0),
+                        description=display[:desc_max_length],
+                        explanation=test_data.get('description', ""),
+                        pointsPass=initial_points,
                         timeout=test_data.get('timeout', 30),
                         hidden=test_data.get('hidden', False),
-                        type='script' # Default type for script-based tests
+                        type='script',
                     )
                     logger.info(f"[TestParsingService] Created test case: {fname}")
-
-                    # Sync learning objectives
                     TestParsingService._sync_test_objectives(t, test_data, assignment)
             except Exception as e:
                 logger.error(f"[TestParsingService] Failed to create/update test case '{fname}': {e}")
-        
-        # Delete obsolete tests
-        # Tests that exist in DB (with functionName) but are NOT in the parsed script
+
+        # Delete tests whose functionName is no longer present in any file.
         for fname, test_case in current_tests.items():
             if fname not in parsed_fnames:
                 logger.info(f"[TestParsingService] Removing obsolete test case: {fname} (ID: {test_case.pk})")
                 test_case.delete()
-        
-        # Calculate total max points from parsed tests
-        total_points = sum(t.get('points', 0) for t in parsed_tests)
-        
-        # Update TestCategory maxPoints without triggering save signals
+
+        # maxPoints reflects the DB points (instructor-owned), not the script.
+        total_points = sum(
+            (tc.pointsPass or 0) for tc in test_category.testCases.all()
+        )
         TestCategory.objects.filter(pk=test_category.pk).update(maxPoints=total_points)
         logger.info(f"[TestParsingService] Sync complete for TestCategory {test_category.pk}: "
-                    f"{len(parsed_tests)} tests, {total_points} total points")
+                    f"{len(parsed_fnames)} tests, {total_points} total points")
 
     @staticmethod
     def _sync_test_objectives(test_case: TestCase, test_data: Dict[str, Any], assignment) -> None:

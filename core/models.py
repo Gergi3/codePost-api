@@ -1729,6 +1729,32 @@ class TestCategory(BaseModel):
   class Meta:
     unique_together = ('name', 'assignment')
 
+
+class TestCategoryFile(BaseModel):
+  """One source file (e.g. a JUnit test class) belonging to a TestCategory.
+
+  A category may hold several test files; they are all staged and compiled
+  together when the suite runs. For single-file categories the legacy
+  ``TestCategory.testScript`` field is still honored as a fallback.
+  """
+  __test__ = False
+
+  if TYPE_CHECKING:
+    id: int
+    category: TestCategory
+
+  category: TestCategory = models.ForeignKey("TestCategory", on_delete=models.CASCADE,  # type: ignore[assignment]
+                               related_name="testFiles", help_text=("The related test category."))
+  name = models.CharField(max_length=255, help_text=("File name, e.g. 'FooTest.java'."))
+  content = models.TextField(blank=True, default="", help_text=("The file's source contents."))
+  sortKey = models.IntegerField(default=0, help_text=("Integer to specify display order."))
+
+  course = property(lambda self: self.category.assignment.course)
+
+  class Meta:
+    unique_together = ('category', 'name')
+    ordering = ['sortKey', 'id']
+
 testTypes = (
     ('io', 'io'),
     ('io_cli', 'io_cli'),
@@ -2293,6 +2319,41 @@ def update_test_cases_from_script(sender, instance, **kwargs):
         TestParsingService.update_test_cases(instance)
     except Exception as e:
         _logger.exception(f"Failed to update test cases for TestCategory {instance.pk}: {e}")
+
+
+@receiver(post_save, sender=TestCategoryFile)
+@receiver(post_delete, sender=TestCategoryFile)
+def update_test_cases_from_file(sender, instance, **kwargs):
+    """Re-sync a category's TestCases when any of its test files change."""
+    import logging
+    _logger = logging.getLogger(__name__)
+    try:
+        from autograder.services.TestParsingService import TestParsingService
+        TestParsingService.update_test_cases(instance.category)
+    except Exception as e:
+        _logger.exception(f"Failed to update test cases for TestCategory {instance.category_id}: {e}")
+
+
+@receiver(post_save, sender=TestCase)
+@receiver(post_delete, sender=TestCase)
+def recompute_category_max_points(sender, instance, **kwargs):
+    """Keep TestCategory.maxPoints in sync with the sum of its tests' pointsPass.
+
+    Fires whenever a TestCase is created/edited (incl. instructor point edits via
+    the API) or deleted. Uses a queryset .update() (no model .save()) so it does
+    not re-trigger the TestCategory sync signal — no recursion.
+    """
+    category_id = instance.testCategory_id
+    if not category_id:
+        return
+    try:
+        total = TestCase.objects.filter(testCategory_id=category_id).aggregate(
+            s=models.Sum('pointsPass'))['s'] or 0
+        TestCategory.objects.filter(pk=category_id).update(maxPoints=total)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            f"Failed to recompute maxPoints for TestCategory {category_id}")
 
 
 @receiver(pre_save, sender=Submission)

@@ -619,6 +619,108 @@ class JavaJUnitDockerExecutionTests(SimpleTestCase):
 
 
 # ###################################################################
+# Java Executor — Multi-file category (test_files + points_by_function)
+# ###################################################################
+
+
+@skip_no_docker
+class JavaJUnitMultiFileDockerExecutionTests(SimpleTestCase):
+    """
+    End-to-end test of the multi-file category path: the executor receives
+    multiple test files via self.test_files + a DB-owned points map via
+    self.points_by_function, stages them all, and the runner discovers
+    @Test methods across all classes.
+    """
+
+    # Reuse the baked image from the sibling class.
+    _image_tag = JavaJUnitDockerExecutionTests._image_tag
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Image was already built by JavaJUnitDockerExecutionTests.setUpClass
+        # when both run in the same session. If run alone it may not exist;
+        # skip gracefully.
+        import docker as docker_lib
+        try:
+            docker_lib.from_env().images.get(cls._image_tag)
+        except Exception:
+            from unittest import SkipTest
+            raise SkipTest("JUnit baked image not available — run JavaJUnitDockerExecutionTests first")
+
+    IMPORTS = (
+        "import org.junit.jupiter.api.Test;\n"
+        "import static org.junit.jupiter.api.Assertions.*;\n"
+    )
+
+    def _execute_multi(
+        self, student_code: str, student_name: str,
+        test_files: list, points_by_function: dict,
+    ) -> ExecutionResult:
+        mock_file = _make_mock_file(student_code, name=student_name, extension=".java")
+        executor = JavaExecutor(
+            mock_file,
+            test_code="import org.junit.jupiter.api.Test;\n// multi-file placeholder",
+            test_files=test_files,
+            points_by_function=points_by_function,
+        )
+        executor.custom_image_name = self._image_tag
+        return executor.execute()
+
+    def test_two_test_files_discover_all_methods(self):
+        student = (
+            "public class Calc {\n"
+            "  public static int add(int a, int b) { return a + b; }\n"
+            "  public static int mul(int a, int b) { return a * b; }\n"
+            "}\n"
+        )
+        file1 = self.IMPORTS + (
+            "public class AddTest {\n"
+            "  @Test void testAdd() { assertEquals(3, Calc.add(1, 2)); }\n"
+            "}\n"
+        )
+        file2 = self.IMPORTS + (
+            "public class MulTest {\n"
+            "  @Test void testMul() { assertEquals(6, Calc.mul(2, 3)); }\n"
+            "  @Test void testWrong() { assertEquals(99, Calc.mul(2, 3)); }\n"
+            "}\n"
+        )
+        result = self._execute_multi(
+            student, "Calc.java",
+            [{"name": "AddTest.java", "content": file1},
+             {"name": "MulTest.java", "content": file2}],
+            {"testAdd": 2.0, "testMul": 3.0, "testWrong": 1.0},
+        )
+        self.assertEqual(len(result.tests), 3,
+                         f"expected 3 tests, got {result.tests}\nstderr:{result.stderr}")
+        by = {t["name"]: t for t in result.tests}
+        self.assertEqual(by["testAdd"]["status"], "passed")
+        self.assertEqual(by["testAdd"]["score"], 2.0)
+        self.assertEqual(by["testAdd"]["max_score"], 2.0)
+        self.assertEqual(by["testMul"]["status"], "passed")
+        self.assertEqual(by["testWrong"]["status"], "failed")
+        self.assertEqual(by["testWrong"]["score"], 0)
+        self.assertEqual(by["testWrong"]["max_score"], 1.0)
+
+    def test_db_points_drive_score_not_script_parsing(self):
+        """Points come from points_by_function (DB), not from script directives."""
+        student = "public class P { public static boolean ok() { return true; } }\n"
+        test = self.IMPORTS + (
+            "public class PTest {\n"
+            "  @Test void worth7() { assertTrue(P.ok()); }\n"
+            "}\n"
+        )
+        result = self._execute_multi(
+            student, "P.java",
+            [{"name": "PTest.java", "content": test}],
+            {"worth7": 7.0},
+        )
+        self.assertEqual(len(result.tests), 1)
+        self.assertEqual(result.tests[0]["score"], 7.0)
+        self.assertEqual(result.tests[0]["max_score"], 7.0)
+
+
+# ###################################################################
 # R Executor — Docker Tests
 # ###################################################################
 

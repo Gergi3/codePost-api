@@ -554,6 +554,26 @@ class TestCategoryResourcePermissions(TemplatePermission):
         return isCourseAdmin(user, course)
 
 
+class TestCategoryFilePermissions(TemplatePermission):
+    """
+    Permissions for TestCategoryFile objects (JUnit test files on a category).
+
+    - POST/PUT/PATCH/DELETE: Course admins only
+    - GET: Course staff
+    """
+
+    def has_object_permission(self, request, view, obj):
+        user = cast(User, request.user)
+        course = obj.category.assignment.course
+
+        # GET: course staff
+        if request.method == "GET":
+            return isCourseStaff(user, course)
+
+        # All write operations: course admin only
+        return isCourseAdmin(user, course)
+
+
 class SubmissionTestPermissions(TemplatePermission):
     """
     Permissions for SubmissionTest objects.

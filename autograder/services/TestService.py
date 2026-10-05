@@ -990,6 +990,21 @@ class TestService:
                     test_timeouts[t['functionName']] = t['timeout']
         
         injected_code = raw_test_code + f"\n\nCODEPOST_TEST_TIMEOUTS = {json.dumps(test_timeouts)}\n"
+
+        # Multi-file JUnit categories: collect all test files + the DB-owned points
+        # map so the Java executor can stage every file and score from the DB
+        # (not by re-parsing the script). Falls back to the single testScript when
+        # a category has no TestCategoryFile rows.
+        test_files = []
+        points_by_function = {}
+        if hasattr(test_case, 'testCategory') and test_case.testCategory:
+            category = test_case.testCategory
+            for f in category.testFiles.all():
+                if (f.content or '').strip():
+                    test_files.append({'name': f.name, 'content': f.content})
+            for t in category.testCases.values('functionName', 'pointsPass'):
+                if t['functionName']:
+                    points_by_function[t['functionName']] = float(t['pointsPass'] or 0)
         
         # DEBUG: Log the code to backend
         logger.info(f"DEBUG_INJECTED_CODE_START\n{injected_code}\nDEBUG_INJECTED_CODE_END")
@@ -1030,15 +1045,17 @@ class TestService:
 
         # Use Factory to get instantiated executor with context
         executor = Executor.factory(
-            file, 
+            file,
             datasets=datasets, # Legacy dataset field (maybe deprecated?)
-            input_data=None, 
+            input_data=None,
             target_cell_id= getattr(test_case, 'targetCellId', None),
             test_code=injected_code,
-            test_function= target_function, 
+            test_function= target_function,
             resources=resources, # Pass new resources list
             content_override=main_file_content,
-            additional_files=additional_files_overrides
+            additional_files=additional_files_overrides,
+            test_files=test_files,  # multi-file JUnit categories
+            points_by_function=points_by_function,  # DB-owned per-test points
         )
         
         if not executor:

@@ -910,6 +910,11 @@ class Executor(abc.ABC):
         self.input_data = kwargs.get('input_data')
         self.test_code = kwargs.get('test_code')
         self.test_function = kwargs.get('test_function')
+        # Multi-file JUnit support: list of {'name', 'content'} test files and a
+        # DB-owned {functionName: points} map. Both optional; the Java executor
+        # falls back to test_code + re-parsed points when absent.
+        self.test_files = kwargs.get('test_files') or []
+        self.points_by_function = kwargs.get('points_by_function') or {}
         
         # Example code: Overrides the target file's data for testing filled-out templates
         example_code = kwargs.get('example_code')
