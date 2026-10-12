@@ -105,13 +105,13 @@ def studentCanSubmitToAssignment(user, assignment):
 def feedbackOpenForSubmission(submission):
   """Comments/rubric/feedback axis open for this submission's student.
 
-  live and released open unconditionally (released content views additionally require
-  isFinalized at their gates, as before); per_student opens exactly when THIS
-  submission is finalized."""
+  live: open immediately regardless of finalization.
+  released: open only once the submission is finalized.
+  per_student: open only once THIS submission is finalized."""
   status = submission.assignment.feedbackStatus
-  if status in ('live', 'released'):
+  if status == 'live':
     return True
-  if status == 'per_student':
+  if status in ('released', 'per_student'):
     return submission.isFinalized
   return False
 

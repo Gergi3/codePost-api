@@ -967,7 +967,14 @@ class TestService:
                 resources.append(resource_entry)
 
         # Prepare Test Code with Timeouts
-        raw_test_code = test_case.testCategory.testScript if hasattr(test_case, 'testCategory') and test_case.testCategory.testScript else test_case.testCode
+        # Use testScript if present; fall back to the first testFile's content so
+        # that _is_junit5() can detect the import and route to _execute_junit5.
+        # (The actual multi-file staging is handled later via test_files kwarg.)
+        _ts = test_case.testCategory.testScript if hasattr(test_case, 'testCategory') and test_case.testCategory else None
+        if not _ts and hasattr(test_case, 'testCategory') and test_case.testCategory:
+            first_file = test_case.testCategory.testFiles.first()
+            _ts = first_file.content if first_file else None
+        raw_test_code = _ts or test_case.testCode
         
         # Inject timeouts
         import json

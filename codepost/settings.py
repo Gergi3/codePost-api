@@ -513,8 +513,8 @@ MAILERS = {
         "BACKEND": "django.core.mail.backends.smtp.EmailBackend",
         "OPTIONS": {
             "host": os.environ.get("EMAIL_HOST", "localhost"),
-            "port": 25,
-            "use_tls": True,
+            "port": 1337,
+            "use_tls": False,
             "use_ssl": False,
         },
     },
