@@ -1,6 +1,7 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
 import logging
 import re
+from collections import Counter
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
 
@@ -301,20 +302,9 @@ class TestService:
                 
                 # Check if this category uses a script (modern) or individual tests (legacy/unit)
                 # If parsed tests exist, it implies a script.
-                if category.testScript:
-                    # Run ONCE for the category
-                    # We pick the first test as a "representative" to trigger the run, 
-                    # but we really just need the category context.
-                    # However, _run_ephemeral_execution currently takes a test_case.
-                    # We should probably pass one test_case to satisfy the signature, 
-                    # and rely on the Executor to run the WHOLE script (which it does).
-                    
-                    # Smart Representative Selection:
-                    # Find the most common target file to avoid outliers (e.g. one test targeting wrong file)
-                    # changing the executor type for the whole category.
-                    from collections import Counter
-                    
-                    # We need to resolve target file for each test to check distinctness
+                if category.testScript or category.testFiles.exists():
+                    pass  # fall through to category_tests block below
+
                 if category_tests:
                     logger.info(f"DEBUG: Category '{category_tests[0].testCategory.name}' Expected Tests: {[t.functionName for t in category_tests]}")
                     
