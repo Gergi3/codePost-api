@@ -458,14 +458,15 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                                 roleType = "admin"
 
                             for userInRoster in newList:
-                                if userInRoster not in oldList:
+                                if userInRoster not in oldList and (
+                                    not userInRoster.is_active or not userInRoster.profile.isPasswordSet
+                                ):
                                     UserAddedToCourseEmail(userInRoster).send_email(
                                         course_name=course.name,
                                         course_period=course.period,
                                         user_type=roleType,
                                         force_send=True
                                     )
-                                    # send_new_user_email(userInRoster, roleType, course)
 
                 from webhooks.signals import hook_event
 
@@ -578,12 +579,13 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                 (newGraders, newStudents), ("grader", "student")
             ):
                 for newUser in userList:
-                    UserAddedToCourseEmail(newUser).send_email(
-                        course_name=course.name,
-                        course_period=course.period,
-                        user_type=roleType,
-                        force_send=True
-                    )
+                    if not newUser.is_active or not newUser.profile.isPasswordSet:
+                        UserAddedToCourseEmail(newUser).send_email(
+                            course_name=course.name,
+                            course_period=course.period,
+                            user_type=roleType,
+                            force_send=True
+                        )
 
         serializer = CourseRosterSerializer(course, context={"request": request})
         return Response(serializer.data)
