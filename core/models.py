@@ -1799,6 +1799,7 @@ class TestCase(BaseModel):
   rubricItem = models.ForeignKey(RubricComment, null=True, blank=True, on_delete=models.SET_NULL, help_text=("The related rubric comment. If set, failure applies this rubric item."))
 
   functionName = models.CharField(max_length=128, blank=True, null=True, help_text=("The name of the function in the test script."))
+  className = models.CharField(max_length=128, blank=True, default="", help_text=("The test class / source file (without extension) this test came from. Disambiguates identical functionNames across files in one category."))
 
   ################# Script / Notebook / Robust Framework Fields ########################
   # Field for custom test scripts (type='script')
@@ -1813,6 +1814,14 @@ class TestCase(BaseModel):
       help_text=("Learning objectives this test is associated with."))
 
   course = property(lambda self: self.testCategory.course)
+
+  class Meta:
+    # A parsed test is uniquely identified by (category, source class, method). This
+    # makes TestParsingService.update_test_cases' get_or_create atomic and prevents the
+    # duplicate-row race regardless of DB-level select_for_update support. Rows with a
+    # NULL functionName (manually-authored IO/unit tests) are exempt — SQL treats NULLs
+    # as distinct, so the constraint only binds parsed script/JUnit tests.
+    unique_together = ('testCategory', 'className', 'functionName')
 
 
 LEARNING_OBJECTIVE_VISIBILITY_MODES = (
@@ -2343,6 +2352,11 @@ def recompute_category_max_points(sender, instance, **kwargs):
     the API) or deleted. Uses a queryset .update() (no model .save()) so it does
     not re-trigger the TestCategory sync signal — no recursion.
     """
+    # On save, skip if pointsPass is not in the updated fields — avoids extra
+    # DB hits when unrelated fields (description, hidden, …) are saved.
+    update_fields = kwargs.get('update_fields')
+    if update_fields is not None and 'pointsPass' not in update_fields:
+        return
     category_id = instance.testCategory_id
     if not category_id:
         return

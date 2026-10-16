@@ -15,3 +15,17 @@ class TestCategorySerializer(ModelSerializerWithPOSTCheck):
     POST_permissions_fields = ('assignment',)
     read_only_fields = ('testCases', 'testFiles', 'resources')
 
+
+class TestCategoryStudentSerializer(ModelSerializerWithPOSTCheck):
+  """Student-safe view of a TestCategory.
+
+  Deliberately omits ``testScript`` (the full test source), ``testFiles``
+  (TestCategoryFile contents) and ``resources`` — otherwise a student could read
+  the instructor's entire test harness via ``GET /assignments/{id}/studentTests/``.
+  """
+
+  class Meta:
+    model = TestCategory
+    fields = ('id', 'name', 'testCases', 'assignment', 'maxPoints', 'sortKey', 'targetFileName')
+    read_only_fields = ('testCases',)
+

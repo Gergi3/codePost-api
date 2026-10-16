@@ -308,77 +308,10 @@ class TestService:
                 if category_tests:
                     logger.info(f"DEBUG: Category '{category_tests[0].testCategory.name}' Expected Tests: {[t.functionName for t in category_tests]}")
                     
-                    # Optimization: Check test.fileName first (explicit target).
-                    
-                    target_counts = Counter()  # noqa: F841
-                    # Determine target file
-                    most_common_fname = None
-                    category = category_tests[0].testCategory # Assuming category_tests is not empty here
-
-                    if category.targetFileName:
-                        most_common_fname = category.targetFileName
-                    else:
-                        # Fallback to a generic name if no files in assignment
-                        assignment_files = list(submission.assignment.files.all())
-                        if assignment_files:
-                            most_common_fname = assignment_files[0].name
-                        else:
-                            most_common_fname = "python.py" 
-
                     # Find a representative test case
                     representative_test = category_tests[0]
-                    
-                    # Manual file lookup to ensure we respect most_common_fname override
-                    target_file_obj = None
-                    submission_files = list(submission.files.all())
-                    if most_common_fname:
-                        target_file_obj = next((f for f in submission_files if f.name == most_common_fname), None)
 
-                    # If the category explicitly targets a file and it's missing from submission,
-                    # do NOT fallback to any other file (that produces misleading syntax errors).
-                    if category.targetFileName and not target_file_obj:
-                        missing_msg = (
-                            f"Target file '{category.targetFileName}' was not found in submission. "
-                            "This test category was not executed."
-                        )
-
-                        for test in category_tests:
-                            TestService._save_test_result(
-                                submission,
-                                test,
-                                False,
-                                0,
-                                missing_msg,
-                                True,
-                                test.pointsPass,
-                                [
-                                    {
-                                        "name": test.functionName,
-                                        "passed": False,
-                                        "score": 0,
-                                        "max_score": test.pointsPass,
-                                        "status": "error",
-                                        "error": missing_msg,
-                                        "message": "Required submission file is missing.",
-                                    }
-                                ],
-                            )
-
-                            all_results.append(
-                                {
-                                    "success": False,
-                                    "error": missing_msg,
-                                    "testCaseId": test.id,
-                                    "testCaseDescription": test.description,
-                                }
-                            )
-
-                        # Skip execution for this category entirely.
-                        continue
-                    
-                    if not target_file_obj:
-                         # Fallback to test case logic if not found (or if explicit target is missing from submission)
-                         target_file_obj = TestService._get_target_file(submission, representative_test)
+                    target_file_obj = TestService._get_target_file(submission, representative_test)
 
                     if not target_file_obj:
                         continue
@@ -410,7 +343,22 @@ class TestService:
                     # Get ALL tests for this category to maximize coverage, even if not requested?
                     # Yes, might as well update all if we have the data.
                     all_category_tests = category.testCases.all()
-                    db_test_map = {t.functionName: t for t in all_category_tests}
+                    # Primary identity is (className, functionName); keep a bare
+                    # functionName map as a fallback for legacy single-file
+                    # categories and results that don't carry a className. The bare
+                    # fallback is ONLY safe when a functionName is unique in the
+                    # category — otherwise it would silently credit an arbitrary one
+                    # of the duplicates (the very bug className was added to fix).
+                    db_test_map = {
+                        ((t.className or ''), t.functionName): t for t in all_category_tests
+                    }
+                    fname_counts = {}
+                    for t in all_category_tests:
+                        fname_counts[t.functionName] = fname_counts.get(t.functionName, 0) + 1
+                    db_test_map_by_fname = {
+                        t.functionName: t for t in all_category_tests
+                        if fname_counts.get(t.functionName) == 1
+                    }
                     
                     processed_ids = set()
                     
@@ -440,44 +388,82 @@ class TestService:
                     
                     # 5b. Process Results & Create New Tests
                     for raw_res in raw_test_results:
-                        func_name = raw_res.get('name') 
+                        func_name = raw_res.get('name')
                         if not func_name: continue
+                        class_name = raw_res.get('className') or ''
 
-                        # Robust Matching Logic
-                        test_case = db_test_map.get(func_name)
-                        
+                        # Robust Matching Logic.
+                        # 1. Exact (className, functionName) — disambiguates identical
+                        #    method names across different test files.
+                        test_case = db_test_map.get((class_name, func_name))
+                        # 2. Bare functionName — only when unambiguous (see map build).
                         if not test_case:
-                             logger.info(f"DEBUG: No exact match for '{func_name}'. Trying fuzzy match.")
+                            test_case = db_test_map_by_fname.get(func_name)
+                            if not test_case and fname_counts.get(func_name, 0) > 1:
+                                logger.warning(
+                                    f"[TestService] Result '{class_name}.{func_name}' did not "
+                                    f"match any (className, functionName), and '{func_name}' is "
+                                    f"ambiguous ({fname_counts[func_name]} tests share it). "
+                                    f"Refusing to guess — this result is unmatched.")
+
+                        if not test_case:
+                             logger.info(f"DEBUG: No exact match for '{class_name}.{func_name}'. Trying fuzzy match.")
                              # Try description match
                              test_case = next((t for t in all_category_tests if t.description == func_name), None)
-                        
+
                         if not test_case:
-                             # Try normalized match
+                             # Try normalized match. Skip normalized-functionName
+                             # matching when the name is ambiguous (duplicate across
+                             # files) to avoid crediting an arbitrary one; a normalized
+                             # DESCRIPTION match is still fine (descriptions are unique).
                              def normalize(s): return s.lower().replace('_', '').replace(' ', '')
                              norm_func = normalize(func_name)
-                             test_case = next((t for t in all_category_tests if normalize(t.functionName) == norm_func or normalize(t.description) == norm_func), None)
+                             fname_ambiguous = fname_counts.get(func_name, 0) > 1
+                             test_case = next(
+                                 (t for t in all_category_tests
+                                  if (not fname_ambiguous and normalize(t.functionName) == norm_func)
+                                  or normalize(t.description) == norm_func),
+                                 None)
 
                         if not test_case:
-                            logger.info(f"DEBUG: Still no match for '{func_name}'. Should sync: {should_sync}")
+                            logger.info(f"DEBUG: Still no match for '{class_name}.{func_name}'. Should sync: {should_sync}")
                             # Still no match -> Create New Test (if syncing)
                             if should_sync:
-                                try:
-                                    logger.info(f"Auto-creating new test case '{func_name}' for category '{category.name}'")
-                                    test_case = TestCase.objects.create(
-                                        testCategory=category,
-                                        functionName=func_name,
-                                        description=raw_res.get('description', func_name),
-                                        pointsPass=raw_res.get('max_score', 1.0),
-                                        type='script', # Assume script type
-
-                                    )
-                                    # Add to tracking
-                                    all_category_tests = list(all_category_tests) # Cast to list if queryset
-                                    all_category_tests.append(test_case)
-                                    processed_ids.add(test_case.id)
-                                except Exception as e:
-                                    logger.error(f"Failed to auto-create test case {func_name}: {e}")
-                                    continue
+                                # Guard: if the result carries no className but a
+                                # className-bearing test with this functionName already
+                                # exists, don't create a stray ('', fn) duplicate —
+                                # the parser owns that row. Reuse it if unambiguous.
+                                if not class_name and fname_counts.get(func_name, 0) >= 1:
+                                    if fname_counts.get(func_name) == 1:
+                                        test_case = db_test_map_by_fname.get(func_name)
+                                    if not test_case:
+                                        logger.warning(
+                                            f"[TestService] Skipping auto-create of empty-className "
+                                            f"'{func_name}': a className-bearing variant already exists "
+                                            f"(ambiguous). Result unmatched.")
+                                        continue
+                                else:
+                                    try:
+                                        logger.info(f"Auto-creating new test case '{class_name}.{func_name}' for category '{category.name}'")
+                                        test_case = TestCase.objects.create(
+                                            testCategory=category,
+                                            functionName=func_name,
+                                            className=class_name,
+                                            description=raw_res.get('description', func_name),
+                                            pointsPass=raw_res.get('max_score', 1.0),
+                                            type='script', # Assume script type
+                                        )
+                                        # Add to tracking
+                                        all_category_tests = list(all_category_tests) # Cast to list if queryset
+                                        all_category_tests.append(test_case)
+                                        db_test_map[(class_name, func_name)] = test_case
+                                        if fname_counts.get(func_name, 0) == 0:
+                                            db_test_map_by_fname[func_name] = test_case
+                                        fname_counts[func_name] = fname_counts.get(func_name, 0) + 1
+                                        processed_ids.add(test_case.id)
+                                    except Exception as e:
+                                        logger.error(f"Failed to auto-create test case {func_name}: {e}")
+                                        continue
                             else:
                                 continue
                         
@@ -604,17 +590,6 @@ class TestService:
             test_case = TestCase.objects.get(id=test_case_id)
             submission = Submission.objects.get(id=submission_id)
 
-            if hasattr(test_case, 'testCategory') and test_case.testCategory and test_case.testCategory.targetFileName:
-                required_name = test_case.testCategory.targetFileName
-                if not submission.files.filter(name=required_name).exists():
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Target file '{required_name}' was not found in submission. "
-                            "This test cannot run until the required file is submitted."
-                        ),
-                    }
-            
             # 1. Identify Target File
             target_file = TestService._get_target_file(submission, test_case)
             if not target_file:
@@ -746,11 +721,22 @@ class TestService:
                  func_name = item.get('name')
                  if not func_name:
                      continue
-                     
+
+                 class_name = item.get('className') or ''
                  try:
-                     test_case = category.testCases.get(functionName=func_name)
+                     if class_name:
+                         test_case = category.testCases.get(functionName=func_name, className=class_name)
+                     else:
+                         # No className: tolerate duplicates by taking the first.
+                         test_case = category.testCases.filter(functionName=func_name).first()
+                         if test_case is None:
+                             raise TestCase.DoesNotExist
                  except TestCase.DoesNotExist:
                      continue
+                 except TestCase.MultipleObjectsReturned:
+                     test_case = category.testCases.filter(functionName=func_name).first()
+                     if test_case is None:
+                         continue
                  
                  passed = bool(item.get('passed', False))
                  score = float(item.get('score', test_case.pointsPass if passed else test_case.pointsFail))
@@ -780,7 +766,9 @@ class TestService:
                  
                  # Resolve TestCase
                  try:
-                     test_case = category.testCases.get(functionName=func_name)
+                     test_case = category.testCases.filter(functionName=func_name).first()
+                     if test_case is None:
+                         continue
                  except TestCase.DoesNotExist:
                      continue
                  
@@ -859,21 +847,12 @@ class TestService:
         Finds the file in the submission that this test case targets.
         """
         files = submission.files.all()
-        
-        # If Category defines a specific target file, use it
-        if hasattr(test_case, 'testCategory') and test_case.testCategory.targetFileName:
-             cat_target = test_case.testCategory.targetFileName
-             for f in files:
-                if f.name == cat_target:
-                    return f
-        
+
         # Heuristic: Find first executable file (based on extension)
-        # TODO: Refine this heuristic or enforce explicit selection
         for f in files:
-            # Simple check for code files
             if any(f.name.endswith(ext) for ext in ['.py', '.java', '.c', '.cpp', '.js', '.R', '.ipynb']):
                 return f
-                
+
         return files.first() if files.exists() else None
 
     @staticmethod
@@ -999,9 +978,11 @@ class TestService:
             for f in category.testFiles.all():
                 if (f.content or '').strip():
                     test_files.append({'name': f.name, 'content': f.content})
-            for t in category.testCases.values('functionName', 'pointsPass'):
+            for t in category.testCases.values('functionName', 'className', 'pointsPass'):
                 if t['functionName']:
-                    points_by_function[t['functionName']] = float(t['pointsPass'] or 0)
+                    cn = t.get('className') or ''
+                    key = f"{cn}.{t['functionName']}" if cn else t['functionName']
+                    points_by_function[key] = float(t['pointsPass'] or 0)
         
         # DEBUG: Log the code to backend
         logger.info(f"DEBUG_INJECTED_CODE_START\n{injected_code}\nDEBUG_INJECTED_CODE_END")

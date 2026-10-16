@@ -306,8 +306,7 @@ def copy_assignment(assignment: Assignment, destination_course: Course,
     )
 
     for testCase in original_testCategory.testCases.all():
-      new_testCase = AssignmentTestCase.objects.create(
-        testCategory=new_testCategory,
+      common = dict(
         sortKey=testCase.sortKey,
         description=testCase.description,
         type=testCase.type,
@@ -321,11 +320,31 @@ def copy_assignment(assignment: Assignment, destination_course: Course,
         # Remap to the cloned rubric comment; a stale pointer outside this
         # assignment's rubric becomes None rather than a cross-course link.
         rubricItem=rubric_comment_map.get(testCase.rubricItem_id) if testCase.rubricItem_id else None,
-        functionName=testCase.functionName,
         testCode=testCase.testCode,
         targetCellId=testCase.targetCellId,
         timeout=testCase.timeout,
       )
+      if testCase.functionName:
+        # The new category was created with testScript set, which fires the post_save
+        # sync that may have already created a parsed row with this (className,
+        # functionName). update_or_create keyed on that identity updates the parsed
+        # row instead of colliding with the unique constraint; className is carried
+        # over so multi-file disambiguation survives the clone.
+        new_testCase, _ = AssignmentTestCase.objects.update_or_create(
+          testCategory=new_testCategory,
+          className=testCase.className,
+          functionName=testCase.functionName,
+          defaults=common,
+        )
+      else:
+        # NULL functionName (manual IO/unit tests) are exempt from the unique
+        # constraint and can't collide — create directly.
+        new_testCase = AssignmentTestCase.objects.create(
+          testCategory=new_testCategory,
+          className=testCase.className,
+          functionName=testCase.functionName,
+          **common,
+        )
       source_objective_ids = testCase.learningObjectives.values_list('id', flat=True)
       new_testCase.learningObjectives.set(
         [learning_objective_map[oid] for oid in source_objective_ids if oid in learning_objective_map])

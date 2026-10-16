@@ -9,10 +9,10 @@ class TestCaseSerializer(ModelSerializerWithPOSTCheck):
   class Meta:
     model = TestCase
     fields = ('id', 'testCategory', 'sortKey', 'description', 'type', 'pointsFail', 'pointsPass', 'text', 'modified',
-              'exposed', 'instances', 'explanation', 'lastSolutionRun', 'testCode', 'targetCellId', 'rubricItem', 'functionName', 'timeout',
+              'exposed', 'instances', 'explanation', 'lastSolutionRun', 'testCode', 'targetCellId', 'rubricItem', 'functionName', 'className', 'timeout',
               'hidden', 'learningObjectives')
     POST_permissions_fields = ('testCategory',)
-    read_only_fields = ('modified', 'instances',)
+    read_only_fields = ('modified', 'instances', 'className',)
     extra_kwargs = {"text": {"trim_whitespace": False}, "description": {
         "trim_whitespace": False}, "explanation": {"trim_whitespace": False}}
 

@@ -61,15 +61,21 @@ class AssignmentCloneTests(TestCase):
             maxPoints=5,
         )
 
-        AssignmentTestCase.objects.create(
+        # The testScript on the category already triggers a parser sync that creates
+        # the test_sum TestCase (className=''). Update that row rather than creating a
+        # colliding duplicate (which the unique constraint now rejects).
+        AssignmentTestCase.objects.update_or_create(
             testCategory=self.category,
-            description="sum test",
-            type="script",
-            pointsPass=5,
-            pointsFail=0,
-            testCode="assert 1 + 1 == 2",
+            className="",
             functionName="test_sum",
-            timeout=15,
+            defaults=dict(
+                description="sum test",
+                type="script",
+                pointsPass=5,
+                pointsFail=0,
+                testCode="assert 1 + 1 == 2",
+                timeout=15,
+            ),
         )
 
         TestCategoryResource.objects.create(

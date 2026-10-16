@@ -29,3 +29,8 @@ class TestCategoryFileViewSet(ListProtectedViewSet):
   queryset = TestCategoryFile.objects.all()
   serializer_class = TestCategoryFileSerializer
   permission_classes = (IsAuthenticated, TestCategoryFilePermissions)
+
+  # NOTE: We do NOT re-sync TestCases here. The TestCategoryFile post_save signal
+  # (core/models.py: update_test_cases_from_file) already triggers update_test_cases
+  # on every save. Calling it a second time from the view raced the signal and
+  # created duplicate TestCase rows.

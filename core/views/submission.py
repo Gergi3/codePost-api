@@ -1,4 +1,5 @@
 # Copyright © 2026 Rutgers, the State University of New Jersey. All rights reserved except as defined by the Rutgers Non-Commercial License, included with this software.
+import re
 from core.models import Submission, File
 from core.models import User
 
@@ -43,6 +44,62 @@ from core.permissions.tokens import submission_token_generator
 from core.emails import StudentFeedbackNotificationEmail, StudentPartnersAddedEmail
 from django.db.models import Q, F
 from django.db import transaction
+
+# Shown to students in place of raw compiler output when their submission fails to
+# compile. Instructors/graders still see the full compiler stderr (in the row logs).
+STUDENT_COMPILE_FAILURE_MESSAGE = (
+    "Your code didn't compile. Fix the compilation errors shown in your files and resubmit."
+)
+
+# Lightweight compile/syntax markers for the student-facing boundary. We also treat
+# "errored but produced no per-test results" as a compile/couldn't-run failure, since a
+# submission that compiled would have run at least one test.
+_COMPILE_MARKERS = re.compile(
+    r"\berror:|cannot find symbol|compilation failed|failed to compile|';' expected|"
+    r"reached end of file while parsing|\bSyntaxError\b|\bIndentationError\b|invalid syntax|"
+    r"unexpected EOF|unexpected token",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_student_test_row(row: dict) -> dict:
+    """Shape a serialized SubmissionTest for a STUDENT viewer.
+
+    - Compile/couldn't-run failures collapse to a single generic message (no raw
+      compiler stderr, which can also reference instructor test files).
+    - Raw execution `logs` are always dropped (grader-only); per-test `results`
+      error/message (assertion text, runtime "Type: message") are preserved.
+    Staff rows must NOT be passed through here.
+    """
+    logs = row.get('logs') or ''
+    results = row.get('results')
+    has_test_results = bool(results) if isinstance(results, (list, dict)) else False
+    is_error = bool(row.get('isError'))
+
+    looks_like_compile = _COMPILE_MARKERS.search(logs) is not None
+    # Errored with no per-test results => it never got far enough to run tests.
+    couldnt_run = is_error and not has_test_results
+
+    if looks_like_compile or couldnt_run:
+        # Collapse to a single synthetic result carrying the generic message, so the UI
+        # renders it through the normal per-test error path (status 'compile_error' tells
+        # the client not to label it as a thrown runtime exception). No raw stderr.
+        row['logs'] = ''
+        row['isError'] = True
+        row['results'] = [{
+            'name': 'Compilation',
+            'passed': False,
+            'score': 0,
+            'maxScore': row.get('maxScore') or 0,
+            'status': 'compile_error',
+            'error': STUDENT_COMPILE_FAILURE_MESSAGE,
+        }]
+    else:
+        # Execution logs are grader-only; the per-test error/message carries the
+        # student-appropriate assertion/runtime detail.
+        row['logs'] = ''
+    return row
+
 
 def get_student_serializer_class(submission, files_only=False):
     """
@@ -453,7 +510,9 @@ class SubmissionViewSet(ListProtectedViewSet):
             if st is not None and st.testCase.hidden:
                 hidden_by_category.setdefault(st.testCase.testCategory_id, []).append(st)
             else:
-                visible_rows.append(st_data)
+                # Student-facing shaping: generic compile message + drop raw execution
+                # logs (grader-only). Assertion/runtime per-test messages are preserved.
+                visible_rows.append(_sanitize_student_test_row(st_data))
 
         synthetic_rows = []
         for cat_id, hidden_tests in hidden_by_category.items():

@@ -23405,6 +23405,11 @@ components:
           nullable: true
           description: The name of the function in the test script.
           maxLength: 128
+        className:
+          type: string
+          readOnly: true
+          description: The test class / source file (without extension) this test
+            came from. Disambiguates identical functionNames across files in one category.
         timeout:
           type: integer
           maximum: 9223372036854775807
@@ -27307,6 +27312,11 @@ components:
           nullable: true
           description: The name of the function in the test script.
           maxLength: 128
+        className:
+          type: string
+          readOnly: true
+          description: The test class / source file (without extension) this test
+            came from. Disambiguates identical functionNames across files in one category.
         timeout:
           type: integer
           maximum: 9223372036854775807
@@ -27324,6 +27334,7 @@ components:
             title: LearningObjectives
           description: Learning objectives this test is associated with.
       required:
+      - className
       - description
       - id
       - instances

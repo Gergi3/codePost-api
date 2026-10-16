@@ -136,10 +136,25 @@ class JavaExecutor(Executor):
             self.log(f"Failed to load JUnitPlatformRunner template: {e}", "error")
             return None
 
-        # Build Java statements that populate the points map. Keys are method names.
+        # Build Java statements that populate the points map. Keys are
+        # "ClassName.methodName"; the runner looks up the composite key first and
+        # falls back to the bare method name. We also emit bare-method keys, but ONLY
+        # for method names that are unambiguous across the category (exactly one test
+        # with that method name) — so an unexpected className mismatch degrades to the
+        # correct points instead of silently defaulting to 1.0, while a genuinely
+        # duplicated method name never resolves to the wrong test's points.
+        entries = dict(points_by_function)
+        bare_counts: dict = {}
+        for fn in entries:
+            bare = fn.split('.', 1)[1] if '.' in fn else fn
+            bare_counts[bare] = bare_counts.get(bare, 0) + 1
+        for fn, pts in list(entries.items()):
+            bare = fn.split('.', 1)[1] if '.' in fn else fn
+            if bare != fn and bare_counts.get(bare) == 1 and bare not in entries:
+                entries[bare] = pts
         put_lines = "\n        ".join(
             f'm.put({json.dumps(str(fn))}, {float(pts)});'
-            for fn, pts in points_by_function.items()
+            for fn, pts in entries.items()
         )
         template = template.replace("#{POINTS_JSON}", put_lines)
         template = template.replace("#{DEFAULT_TIMEOUT}", f"{int(default_timeout_s)}s")
@@ -176,10 +191,15 @@ class JavaExecutor(Executor):
             from autograder.services.TestParsingService import TestParsingService
             points_by_function = {}
             for tf in test_files:
+                # Derive className from the class declared in the source (matching the
+                # runtime getClassName()), not the filename stem.
+                class_name = TestParsingService._derive_class_name(
+                    tf.get('name') or "", tf.get('content') or "", 'java')
                 try:
                     for t in TestParsingService._parse_java(tf['content']):
                         if t.get('functionName'):
-                            points_by_function[t['functionName']] = t.get('points', 1.0)
+                            key = f"{class_name}.{t['functionName']}" if class_name else t['functionName']
+                            points_by_function[key] = t.get('points', 1.0)
                 except Exception:
                     pass
 

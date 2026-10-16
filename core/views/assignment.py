@@ -18,7 +18,7 @@ from core.serializers.submissionHistory import SubmissionHistorySerializer
 from core.serializers.comment import CommentSerializer
 
 from core.serializers.testCase import TestCaseStudentSerializer
-from core.serializers.testCategory import TestCategorySerializer
+from core.serializers.testCategory import TestCategorySerializer, TestCategoryStudentSerializer
 from core.serializers.learningObjective import LearningObjectiveSerializer
 from core.serializers.file import FileValidationSerializerWithoutSubmission, SubmissionFileStudentUploadSerializer
 
@@ -728,7 +728,13 @@ class AssignmentViewSet(ListProtectedViewSet):
     test_categories = list(set(map(lambda test_case: test_case.testCategory, test_cases)))  # remove duplicates
 
     case_serializer = TestCaseStudentSerializer(test_cases, many=True, context={'request': request})
-    category_serializer = TestCategorySerializer(test_categories, many=True, context={'request': request})
+    # Staff get the full category (incl. testScript / testFiles / resources); students must
+    # not — that would hand them the entire test harness. isCourseStaff covers graders,
+    # admins, and the admin "see as student" / live-feedback paths above.
+    CategorySerializer = (
+        TestCategorySerializer if isCourseStaff(user, assignment.course) else TestCategoryStudentSerializer
+    )
+    category_serializer = CategorySerializer(test_categories, many=True, context={'request': request})
     return Response({
         'id': assignment.id,
         'testCases': case_serializer.data,

@@ -57,6 +57,7 @@ public class JUnitPlatformRunner {
 
     static final class Result {
         String name;
+        String className;
         String description;
         double score;
         double maxScore;
@@ -141,14 +142,30 @@ public class JUnitPlatformRunner {
                     .map(src -> ((MethodSource) src).getMethodName())
                     .orElse(id.getDisplayName());
 
+            // Fully-qualified class, reduced to the simple name (JUnit convention:
+            // the simple class name equals the source file stem). Used to keep
+            // identical method names in different test files distinct.
+            String simpleClass = id.getSource()
+                    .filter(src -> src instanceof MethodSource)
+                    .map(src -> ((MethodSource) src).getClassName())
+                    .map(cn -> cn.contains(".") ? cn.substring(cn.lastIndexOf('.') + 1) : cn)
+                    .orElse("");
+
             Result r = new Result();
             r.name = methodName;
+            r.className = simpleClass;
             // Jupiter defaults displayName to "method()"; only surface it when the
             // author set a real @DisplayName (i.e. it differs from the raw method).
             String display = id.getDisplayName();
             r.description = (display != null && !display.equals(methodName) && !display.equals(methodName + "()"))
                     ? display : "";
-            r.maxScore = points.getOrDefault(methodName, 1.0);
+            // Points map is keyed by "Class.method" (preferred) with a fallback to
+            // the bare method name for legacy single-file categories.
+            Double pts = points.get(simpleClass + "." + methodName);
+            if (pts == null) {
+                pts = points.getOrDefault(methodName, 1.0);
+            }
+            r.maxScore = pts;
             r.output = "";
 
             switch (result.getStatus()) {
@@ -167,11 +184,17 @@ public class JUnitPlatformRunner {
                     // so this single check cleanly separates an assertion failure
                     // ("failed") from any other exception ("error").
                     r.status = (cause instanceof AssertionError) ? "failed" : "error";
-                    r.error = truncate(cause != null ? stackToString(cause) : "Test did not pass");
+                    r.error = truncate(cause != null ? messageOnly(cause) : "Test did not pass");
                     break;
             }
             results.add(r);
         }
+    }
+
+    private static String messageOnly(Throwable t) {
+        String full = t.toString();
+        int nl = full.indexOf('\n');
+        return nl > 0 ? full.substring(0, nl) : full;
     }
 
     private static String stackToString(Throwable t) {
@@ -205,6 +228,7 @@ public class JUnitPlatformRunner {
             }
             sb.append("{")
               .append("\"name\":").append(jsonStr(r.name)).append(",")
+              .append("\"className\":").append(jsonStr(r.className)).append(",")
               .append("\"description\":").append(jsonStr(r.description)).append(",")
               .append("\"score\":").append(num(r.score)).append(",")
               .append("\"max_score\":").append(num(r.maxScore)).append(",")

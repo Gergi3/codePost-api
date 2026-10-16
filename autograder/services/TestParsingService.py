@@ -4,7 +4,8 @@ import ast
 import re
 import logging
 from typing import List, Dict, Any, Optional
-from core.models import TestCategory, TestCase, LearningObjective
+from django.db import transaction
+from core.models import TestCategory, TestCase, LearningObjective, SubmissionTest
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +533,74 @@ class TestParsingService:
         words = [w[:1].upper() + w[1:] if w.islower() else w for w in s.split(' ')]
         return ' '.join(words)
 
+    # First class declared in a .java source (public preferred). The JUnit runtime
+    # reports MethodSource.getClassName() = the actual class simple name, which may
+    # differ from the filename for a non-public top-level class, so we read it from
+    # the source instead of trusting the filename stem.
+    _JAVA_PUBLIC_CLASS_RE = re.compile(
+        r'\bpublic\s+(?:final\s+|abstract\s+)*class\s+([A-Za-z_$][A-Za-z0-9_$]*)'
+    )
+    _JAVA_ANY_CLASS_RE = re.compile(r'\bclass\s+([A-Za-z_$][A-Za-z0-9_$]*)')
+
+    @staticmethod
+    def _derive_class_name(fname: str, source: str, language: Optional[str]) -> str:
+        """Resolve the className to tag parsed tests with.
+
+        For Java, prefer the class actually declared in the source (public class
+        first, else the first class) so it equals the runtime getClassName(); fall
+        back to the filename stem. For other languages the filename stem is used.
+        """
+        stem = re.sub(r'\.[^.]+$', '', fname) if fname else ""
+        lang = (language or "").lower()
+        is_java = lang == 'java' or lang.startswith('java-') or (not lang and fname.endswith('.java'))
+        if is_java and source:
+            m = (TestParsingService._JAVA_PUBLIC_CLASS_RE.search(source)
+                 or TestParsingService._JAVA_ANY_CLASS_RE.search(source))
+            if m:
+                return m.group(1)
+        return stem
+
+    @staticmethod
+    def _pick_dup_keeper(a: TestCase, b: TestCase):
+        """Given two duplicate TestCases, return (loser, keeper).
+
+        Keep the row with more SubmissionTest instances (real grade data); on a tie
+        keep the lower id (the longer-lived row). Returns the other as the loser to
+        be merged into the keeper and deleted.
+        """
+        a_n = SubmissionTest.objects.filter(testCase=a).count()
+        b_n = SubmissionTest.objects.filter(testCase=b).count()
+        if b_n > a_n or (b_n == a_n and b.pk < a.pk):
+            return a, b
+        return b, a
+
+    @staticmethod
+    def _merge_duplicate_test(loser: TestCase, keeper: TestCase) -> None:
+        """Re-point the loser's SubmissionTest instances to the keeper, then delete
+        the loser. TestCase.instances is on_delete=CASCADE, so deleting without first
+        migrating would destroy student results.
+
+        SubmissionTest has no (submission, testCase) uniqueness, but we still avoid
+        creating two rows for the same submission on the keeper: for any submission
+        that already has a keeper row, drop the loser's row instead of re-pointing.
+        """
+        if loser.pk == keeper.pk:
+            return
+        logger.warning(f"[TestParsingService] Merging duplicate test case "
+                       f"{loser.className}.{loser.functionName} (ID {loser.pk}) into "
+                       f"ID {keeper.pk}; migrating SubmissionTest instances.")
+        keeper_submissions = set(
+            SubmissionTest.objects.filter(testCase=keeper).values_list('submission_id', flat=True)
+        )
+        # Drop loser rows that would collide with an existing keeper row for the same
+        # submission (keeper's result wins); re-point the rest.
+        if keeper_submissions:
+            SubmissionTest.objects.filter(
+                testCase=loser, submission_id__in=keeper_submissions
+            ).delete()
+        SubmissionTest.objects.filter(testCase=loser).update(testCase=keeper)
+        loser.delete()
+
     @staticmethod
     def update_test_cases(test_category: TestCategory):
         """
@@ -553,11 +622,19 @@ class TestParsingService:
         assignment = test_category.assignment
 
         # Parse @Test methods from every file in the category (multi-file aware).
+        # Tag each parsed test with the className — for Java this is the class
+        # declared in the source (matching the runtime getClassName()), not the
+        # filename stem — so identical functionNames in different files stay distinct
+        # AND match at grading time.
         parsed_tests = []
         for _fname, source in TestParsingService._iter_category_sources(test_category):
+            class_name = TestParsingService._derive_class_name(_fname, source, language)
             mock = TestCategory(testScript=source)
             try:
-                parsed_tests.extend(TestParsingService.parse_script(mock, language=language))
+                file_tests = TestParsingService.parse_script(mock, language=language)
+                for t in file_tests:
+                    t['className'] = class_name
+                parsed_tests.extend(file_tests)
             except Exception as e:
                 logger.error(f"[TestParsingService] Failed to parse a test file: {e}")
 
@@ -568,69 +645,120 @@ class TestParsingService:
             logger.warning(f"[TestParsingService] No tests parsed for TestCategory {test_category.pk}.")
             return
 
-        current_tests = {t.functionName: t for t in test_category.testCases.all() if t.functionName}
-        parsed_fnames = set()
         desc_max_length = TestCase._meta.get_field('description').max_length or 255
 
-        for test_data in parsed_tests:
-            fname = test_data['functionName']
-            if fname in parsed_fnames:
-                # Duplicate functionName across files in one category — keep the
-                # first and warn (collision; author should rename or we'd grade one).
-                logger.warning(f"[TestParsingService] Duplicate test functionName '{fname}' "
-                               f"in category {test_category.pk}; keeping the first occurrence.")
-                continue
-            parsed_fnames.add(fname)
-
+        # All DB mutation happens under a row lock on the category so two concurrent
+        # syncs (e.g. the TestCategoryFile post_save signal firing while another
+        # save is in flight) serialize. NOTE: the real guarantee against duplicate
+        # (testCategory, className, functionName) rows is the DB unique constraint on
+        # TestCase (see its Meta); this lock is belt-and-suspenders and is a no-op on
+        # SQLite (dev/test), which the constraint covers regardless.
+        with transaction.atomic():
+            # Force lock acquisition in MySQL/MariaDB; silently ignored on SQLite.
             try:
-                if fname in current_tests:
-                    # Existing test: preserve instructor-owned fields (pointsPass,
-                    # description, hidden, explanation). Nothing to update here —
-                    # the script no longer owns points/names.
-                    TestParsingService._sync_test_objectives(current_tests[fname], test_data, assignment)
-                else:
-                    # New test: seed a readable default description and 1 point.
-                    # Prefer a real @DisplayName (parser sets name != functionName);
-                    # otherwise humanize the method name (don't show it raw).
-                    parsed_name = test_data.get('name')
-                    if parsed_name and parsed_name != fname:
-                        display = parsed_name
+                TestCategory.objects.select_for_update().get(pk=test_category.pk)
+            except TestCategory.DoesNotExist:
+                return
+
+            # Collapse any pre-existing duplicate (className, functionName) rows.
+            # Protects against rows created by an earlier racy sync (before the
+            # unique constraint existed). This is DESTRUCTIVE of a TestCase row, so we
+            # must first migrate its SubmissionTest instances (student results) to the
+            # keeper — TestCase.instances is on_delete=CASCADE, so a naive delete would
+            # wipe grade data.
+            current_tests: Dict[tuple, TestCase] = {}
+            for t in test_category.testCases.all().order_by('id'):
+                if not t.functionName:
+                    continue
+                k = (t.className or "", t.functionName)
+                if k not in current_tests:
+                    current_tests[k] = t
+                    continue
+                # Duplicate: decide which row to keep. Prefer the one with more
+                # SubmissionTest instances (real grade data); tie-break on lowest id
+                # (the one already stored, since we iterate ascending).
+                existing = current_tests[k]
+                loser, keeper = TestParsingService._pick_dup_keeper(existing, t)
+                current_tests[k] = keeper
+                TestParsingService._merge_duplicate_test(loser, keeper)
+
+            parsed_keys = set()
+
+            # Pre-compute the default per-test points before the loop so every new
+            # test in this sync gets the same share. Uses Decimal to avoid float
+            # precision loss (e.g. 10/3 → 3.33; 3.33*3 = 9.99 ≠ 10).
+            _n_parsed = len(parsed_tests)
+            if test_category.maxPoints and test_category.maxPoints > 0 and _n_parsed > 0:
+                from decimal import Decimal as _Decimal, ROUND_HALF_UP as _ROUND_HALF_UP
+                _default_points = (
+                    _Decimal(str(test_category.maxPoints)) / _Decimal(_n_parsed)
+                ).quantize(_Decimal('0.01'), rounding=_ROUND_HALF_UP)
+            else:
+                _default_points = 1.0
+
+            for test_data in parsed_tests:
+                fname = test_data['functionName']
+                cname = test_data.get('className', "") or ""
+                key = (cname, fname)
+                if key in parsed_keys:
+                    # Same (class, method) twice — genuine duplicate within one file;
+                    # keep the first and warn.
+                    logger.warning(f"[TestParsingService] Duplicate test '{cname}.{fname}' "
+                                   f"in category {test_category.pk}; keeping the first occurrence.")
+                    continue
+                parsed_keys.add(key)
+
+                try:
+                    if key in current_tests:
+                        # Existing test: preserve instructor-owned fields (pointsPass,
+                        # description, hidden, explanation). Nothing to update here —
+                        # the script no longer owns points/names.
+                        TestParsingService._sync_test_objectives(current_tests[key], test_data, assignment)
                     else:
-                        display = TestParsingService._humanize(fname)
-                    # Seed initial points from the parsed script. For JUnit bare @Test
-                    # the parser has no points annotation → defaults to 1.0; for Python
-                    # @test(points=5) or legacy Java @Test(points=5) we honour the value.
-                    # After first create the instructor can override via the UI (PATCH)
-                    # and those edits are preserved by the existing-test branch above.
-                    initial_points = float(test_data.get('points') or 1.0)
-                    t = TestCase.objects.create(
-                        testCategory=test_category,
-                        functionName=fname,
-                        description=display[:desc_max_length],
-                        explanation=test_data.get('description', ""),
-                        pointsPass=initial_points,
-                        timeout=test_data.get('timeout', 30),
-                        hidden=test_data.get('hidden', False),
-                        type='script',
-                    )
-                    logger.info(f"[TestParsingService] Created test case: {fname}")
-                    TestParsingService._sync_test_objectives(t, test_data, assignment)
-            except Exception as e:
-                logger.error(f"[TestParsingService] Failed to create/update test case '{fname}': {e}")
+                        # New test: seed a readable default description and 1 point.
+                        # Prefer a real @DisplayName (parser sets name != functionName);
+                        # otherwise humanize the method name (don't show it raw).
+                        parsed_name = test_data.get('name')
+                        if parsed_name and parsed_name != fname:
+                            display = parsed_name
+                        else:
+                            display = TestParsingService._humanize(fname)
+                        initial_points = float(test_data.get('points') or _default_points)
+                        # get_or_create (not create) so a row that slipped in between
+                        # the dedupe scan and here can never become a duplicate.
+                        t, created = TestCase.objects.get_or_create(
+                            testCategory=test_category,
+                            functionName=fname,
+                            className=cname,
+                            defaults=dict(
+                                description=display[:desc_max_length],
+                                explanation=test_data.get('description', ""),
+                                pointsPass=initial_points,
+                                timeout=test_data.get('timeout', 30),
+                                hidden=test_data.get('hidden', False),
+                                type='script',
+                            ),
+                        )
+                        current_tests[key] = t
+                        if created:
+                            logger.info(f"[TestParsingService] Created test case: {cname}.{fname}")
+                        TestParsingService._sync_test_objectives(t, test_data, assignment)
+                except Exception as e:
+                    logger.error(f"[TestParsingService] Failed to create/update test case '{cname}.{fname}': {e}")
 
-        # Delete tests whose functionName is no longer present in any file.
-        for fname, test_case in current_tests.items():
-            if fname not in parsed_fnames:
-                logger.info(f"[TestParsingService] Removing obsolete test case: {fname} (ID: {test_case.pk})")
-                test_case.delete()
+            # Delete tests whose (className, functionName) is no longer present.
+            for key, test_case in list(current_tests.items()):
+                if key not in parsed_keys:
+                    logger.info(f"[TestParsingService] Removing obsolete test case: {key[0]}.{key[1]} (ID: {test_case.pk})")
+                    test_case.delete()
 
-        # maxPoints reflects the DB points (instructor-owned), not the script.
-        total_points = sum(
-            (tc.pointsPass or 0) for tc in test_category.testCases.all()
-        )
-        TestCategory.objects.filter(pk=test_category.pk).update(maxPoints=total_points)
-        logger.info(f"[TestParsingService] Sync complete for TestCategory {test_category.pk}: "
-                    f"{len(parsed_fnames)} tests, {total_points} total points")
+            # maxPoints reflects the DB points (instructor-owned), not the script.
+            total_points = sum(
+                (tc.pointsPass or 0) for tc in test_category.testCases.all()
+            )
+            TestCategory.objects.filter(pk=test_category.pk).update(maxPoints=total_points)
+            logger.info(f"[TestParsingService] Sync complete for TestCategory {test_category.pk}: "
+                        f"{len(parsed_keys)} tests, {total_points} total points")
 
     @staticmethod
     def _sync_test_objectives(test_case: TestCase, test_data: Dict[str, Any], assignment) -> None:
