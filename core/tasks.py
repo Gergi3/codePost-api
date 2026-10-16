@@ -1414,6 +1414,22 @@ def import_quiz_qti(job_id: int, import_quizzes: bool = False):
 
 
 @shared_task
+def send_user_added_to_course_email(user_id: int, course_name: str, course_period: str, user_type: str, force_send: bool = False):
+    from core.models import User
+    from core.emails import UserAddedToCourseEmail
+    try:
+        user = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return
+    UserAddedToCourseEmail(user).send_email(
+        course_name=course_name,
+        course_period=course_period,
+        user_type=user_type,
+        force_send=force_send,
+    )
+
+
+@shared_task
 def clear_expired_oauth_tokens():
     """Purge expired OAuth grants/tokens (django-oauth-toolkit's cleartokens).
 

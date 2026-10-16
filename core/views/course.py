@@ -60,6 +60,7 @@ from core.utils import get_or_create_user
 # Can override get_serializer method to use different serializer for
 # different user types
 from core.emails import UserAddedToCourseEmail
+from core.tasks import send_user_added_to_course_email
 
 class QuizAccommodationRowSerializer(serializers.Serializer):
     """One per-student quiz accommodation: extra-time multiplier + SEB exemption."""
@@ -461,11 +462,12 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                                 if userInRoster not in oldList and (
                                     not userInRoster.is_active or not userInRoster.profile.isPasswordSet
                                 ):
-                                    UserAddedToCourseEmail(userInRoster).send_email(
+                                    send_user_added_to_course_email.delay(
+                                        userInRoster.pk,
                                         course_name=course.name,
                                         course_period=course.period,
                                         user_type=roleType,
-                                        force_send=True
+                                        force_send=True,
                                     )
 
                 from webhooks.signals import hook_event
@@ -562,13 +564,14 @@ class CourseViewSet(SuperUserListProtectedViewSet):
             # and modify rosters.
             add_admin_privileges(admin)
 
-            if not admin.is_active or course.emailNewUsers: 
+            if not admin.is_active or course.emailNewUsers:
                 # Email the admin that they have been added to the course, so they can activate their account, bypasses email new users setting for course
-                UserAddedToCourseEmail(admin).send_email(
+                send_user_added_to_course_email.delay(
+                    admin.pk,
                     course_name=course.name,
                     course_period=course.period,
                     user_type="admin",
-                    force_send=course.emailNewUsers
+                    force_send=course.emailNewUsers,
                 )
 
         # If course setting is set, email newly created users
@@ -580,11 +583,12 @@ class CourseViewSet(SuperUserListProtectedViewSet):
             ):
                 for newUser in userList:
                     if not newUser.is_active or not newUser.profile.isPasswordSet:
-                        UserAddedToCourseEmail(newUser).send_email(
+                        send_user_added_to_course_email.delay(
+                            newUser.pk,
                             course_name=course.name,
                             course_period=course.period,
                             user_type=roleType,
-                            force_send=True
+                            force_send=True,
                         )
 
         serializer = CourseRosterSerializer(course, context={"request": request})
