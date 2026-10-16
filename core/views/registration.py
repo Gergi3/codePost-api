@@ -46,6 +46,7 @@ from core.serializers.registration import (
 )
 
 from core.emails import AdminAlreadyEmail, AdminChangeOrganizationEmail, ExistingOrgAdminRequestEmail, NewAdminActivationEmail, NewOrgAdminRequestEmail, PasswordResetEmail, PendingConfirmationEmail, UserAddedToCourseEmail
+from core.tasks import send_user_added_to_course_email
 
 from core.permissions.helpers import (
     returnNotAuthorized,
@@ -120,7 +121,8 @@ def emailRegistration(request):
                     newUser.save()
                     course.students.add(newUser)
                     # Send activation email to new user
-                    UserAddedToCourseEmail(newUser).send_email(
+                    send_user_added_to_course_email.delay(
+                        newUser.pk,
                         course_name=course.name,
                         course_period=course.period,
                         user_type="student",
