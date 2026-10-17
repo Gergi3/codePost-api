@@ -255,7 +255,7 @@ class TestService:
         return annotated
 
     @staticmethod
-    def run_suite(submission_id: int, test_case_ids: Optional[List[int]] = None, user_id: Optional[str] = None, file_overrides: Optional[Dict[int, str]] = None) -> List[Dict[str, Any]]:
+    def run_suite(submission_id: int, test_case_ids: Optional[List[int]] = None, user_id: Optional[str] = None, file_overrides: Optional[Dict[int, str]] = None, allow_sync: bool = False) -> List[Dict[str, Any]]:
         file_overrides = TestService._sanitize_overrides(file_overrides)
         """
         Runs a suite of tests for a submission.
@@ -427,8 +427,11 @@ class TestService:
 
                         if not test_case:
                             logger.info(f"DEBUG: Still no match for '{class_name}.{func_name}'. Should sync: {should_sync}")
-                            # Still no match -> Create New Test (if syncing)
-                            if should_sync:
+                            # Still no match -> Create New Test (only when a caller explicitly
+                            # opts into syncing instructor-owned TestCases). Student submission
+                            # runs must never mutate the instructor's test set — the authoritative
+                            # sync lives in TestParsingService.update_test_cases (on file save).
+                            if should_sync and allow_sync:
                                 # Guard: if the result carries no className but a
                                 # className-bearing test with this functionName already
                                 # exists, don't create a stray ('', fn) duplicate —
@@ -495,14 +498,20 @@ class TestService:
                             }
                             all_results.append(result_data)
 
-                    # 5c. Delete Stale Tests
-                    if should_sync:
+                    # 5c. Delete Stale Tests — only when a caller explicitly opts into syncing
+                    # instructor-owned TestCases AND the run actually produced results. An empty
+                    # result set (non-compiling submission, or a submission lacking the tested
+                    # class) is NOT evidence that the instructor's tests no longer exist, so it
+                    # must never trigger deletion. Student submission runs pass allow_sync=False,
+                    # so they fall through to the "report missing" branch below and leave the
+                    # instructor's TestCases (and TestCategory.maxPoints) intact.
+                    if should_sync and allow_sync and raw_test_results:
                         for test in all_category_tests:
                             if test.id not in processed_ids:
                                 logger.info(f"Auto-deleting stale test case '{test.functionName}' (id={test.id}) for category '{category.name}'")
                                 test.delete()
                                 # Do NOT report error for deleted test
-                    
+
                     else:
                         # REPORT MISSING IF NOT SYNCING (or if crash prevented sync)
                         for test in category_tests:

@@ -440,35 +440,34 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                         # and modify rosters.
                         add_admin_privileges(admin)
 
-                # If course setting is set, email newly created users
-                if course.emailNewUsers:
-                    # Email new students
-                    for keyEl in ["students", "graders", "courseAdmins"]:
-                        if keyEl in request.data:
-                            if keyEl == "students":
-                                oldList = oldStudents
-                                newList = course.students.all()
-                                roleType = "student"
-                            elif keyEl == "graders":
-                                oldList = oldGraders
-                                newList = course.graders.all()
-                                roleType = "grader"
-                            elif keyEl == "courseAdmins":
-                                oldList = oldAdmins
-                                newList = course.courseAdmins.all()
-                                roleType = "admin"
+                # Always email unactivated new users; force_send respects emailNewUsers.
+                for keyEl in ["students", "graders", "courseAdmins"]:
+                    if keyEl in request.data:
+                        if keyEl == "students":
+                            oldList = oldStudents
+                            newList = course.students.all()
+                            roleType = "student"
+                        elif keyEl == "graders":
+                            oldList = oldGraders
+                            newList = course.graders.all()
+                            roleType = "grader"
+                        elif keyEl == "courseAdmins":
+                            oldList = oldAdmins
+                            newList = course.courseAdmins.all()
+                            roleType = "admin"
 
-                            for userInRoster in newList:
-                                if userInRoster not in oldList and (
-                                    not userInRoster.is_active or not userInRoster.profile.isPasswordSet
-                                ):
-                                    send_user_added_to_course_email.delay(
-                                        userInRoster.pk,
-                                        course_name=course.name,
-                                        course_period=course.period,
-                                        user_type=roleType,
-                                        force_send=True,
-                                    )
+                        for userInRoster in newList:
+                            if userInRoster not in oldList and (
+                                not userInRoster.is_active or not userInRoster.profile.isPasswordSet
+                                or course.emailNewUsers
+                            ):
+                                send_user_added_to_course_email.delay(
+                                    userInRoster.pk,
+                                    course_name=course.name,
+                                    course_period=course.period,
+                                    user_type=roleType,
+                                    force_send=course.emailNewUsers,
+                                )
 
                 from webhooks.signals import hook_event
 
@@ -574,22 +573,20 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                     force_send=course.emailNewUsers,
                 )
 
-        # If course setting is set, email newly created users
-        if course.emailNewUsers:
-            # Email new students
-
-            for userList, roleType in zip(
-                (newGraders, newStudents), ("grader", "student")
-            ):
-                for newUser in userList:
-                    if not newUser.is_active or not newUser.profile.isPasswordSet:
-                        send_user_added_to_course_email.delay(
-                            newUser.pk,
-                            course_name=course.name,
-                            course_period=course.period,
-                            user_type=roleType,
-                            force_send=True,
-                        )
+        # Always email unactivated users; force_send (re-emails already active users)
+        # respects the course emailNewUsers toggle.
+        for userList, roleType in zip(
+            (newGraders, newStudents), ("grader", "student")
+        ):
+            for newUser in userList:
+                if not newUser.is_active or not newUser.profile.isPasswordSet or course.emailNewUsers:
+                    send_user_added_to_course_email.delay(
+                        newUser.pk,
+                        course_name=course.name,
+                        course_period=course.period,
+                        user_type=roleType,
+                        force_send=course.emailNewUsers,
+                    )
 
         serializer = CourseRosterSerializer(course, context={"request": request})
         return Response(serializer.data)
