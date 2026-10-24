@@ -1153,6 +1153,29 @@ class Executor(abc.ABC):
             
             tar_stream = BytesIO()
             with tarfile.open(fileobj=tar_stream, mode='w') as tar:
+                # Emit explicit, codepost-owned directory entries for every parent
+                # dir first. Otherwise Docker auto-creates intermediate dirs (e.g.
+                # src/bg/sofia/...) owned by root, and the non-root codepost process
+                # can't move files out of them — the package normalizer's `mv` then
+                # fails with "Permission denied".
+                seen_dirs = set()
+                for filename in files:
+                    rel = filename.lstrip('/') if filename.startswith('/') else filename
+                    parts = rel.split('/')[:-1]  # drop the filename
+                    for i in range(1, len(parts) + 1):
+                        d = '/'.join(parts[:i])
+                        if d and d not in seen_dirs:
+                            seen_dirs.add(d)
+                            di = tarfile.TarInfo(name=d)
+                            di.type = tarfile.DIRTYPE
+                            # World-writable: the grading container's user uid varies
+                            # per image (e.g. codepost may be 1000 or 1001), so rather
+                            # than guess the owner we make the staged dirs writable by
+                            # any uid. This lets the package normalizer mv/mkdir inside
+                            # the tree regardless of who runs. Safe: the container is
+                            # single-run, network-disabled, and all-caps-dropped.
+                            di.mode = 0o777
+                            tar.addfile(di)
                 for filename, content in files.items():
                     # If absolute, strip leading slash for tar name (extracted relative to dest_path)
                     # When extracting to '/', stripping leading slash makes it work: /etc/foo -> etc/foo -> /etc/foo
@@ -1171,8 +1194,11 @@ class Executor(abc.ABC):
                             pass
                     tarinfo = tarfile.TarInfo(name=tar_name)
                     tarinfo.size = len(content_bytes)
-                    tarinfo.mode = 0o644
-                    
+                    # World-writable so the normalizer (running as whatever uid the
+                    # env image assigns to its user) can move/rewrite it — see the
+                    # directory-entry note above for why we don't pin an owner uid.
+                    tarinfo.mode = 0o666
+
                     tar.addfile(tarinfo, BytesIO(content_bytes))
             
             tar_stream.seek(0)

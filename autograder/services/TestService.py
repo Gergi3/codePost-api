@@ -5,7 +5,7 @@ from collections import Counter
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
 
-from core.models import TestCase, TestCategory, Submission, SubmissionTest, File, CachedExecutionResult
+from core.models import TestCase, TestCategory, Submission, SubmissionTest, File, CachedExecutionResult, SubmissionGradeSnapshot, suppress_grade_snapshot
 from autograder.services.executors import Executor
 
 logger = logging.getLogger(__name__)
@@ -262,6 +262,8 @@ class TestService:
         Optimized to group tests by Category and run each category script only once.
         """
         _results = []
+        _suppress = suppress_grade_snapshot()
+        _suppress.__enter__()
         try:
             submission = Submission.objects.get(id=submission_id)
             assignment = submission.assignment
@@ -366,6 +368,11 @@ class TestService:
                     # Handle missing tests logic with Auto-Sync
                     stdout_log = exec_result_dict.get('stdout', '')
                     stderr_log = exec_result_dict.get('stderr', '')
+                    # A hard executor error (e.g. a rejected filename, a failed compile,
+                    # "no code") carried in `error` rather than in stderr. When the run
+                    # produced no test results, this is the real, student-friendly reason
+                    # and must be surfaced instead of the generic "name mismatch" fallback.
+                    executor_error = exec_result_dict.get('error')
                     combined_log = (stdout_log + "\n" + stderr_log).strip()
                     if len(combined_log) > 1000:
                         combined_log = combined_log[:1000] + "... (truncated)"
@@ -516,8 +523,17 @@ class TestService:
                         # REPORT MISSING IF NOT SYNCING (or if crash prevented sync)
                         for test in category_tests:
                             if test.id not in processed_ids:
+                                 # A hard executor error with no results (rejected filename,
+                                 # compile failure, etc.) — surface the real reason verbatim.
+                                 if executor_error and not raw_test_results:
+                                     error_msg = str(executor_error)
+                                     if stderr_log:
+                                         snippet = stderr_log[:2000]
+                                         if len(stderr_log) > 2000:
+                                             snippet += "\n... (truncated)"
+                                         error_msg += f"\n\n{snippet}"
                                  # It was requested but we didn't get a result
-                                 if script_crashed:
+                                 elif script_crashed:
                                      error_msg = f"Test script failed to execute. Tests were not run.\nExpected: {test.functionName} ({test.description})\n"
                                      # Include truncated stderr so the instructor sees the traceback
                                      if stderr_log:
@@ -583,9 +599,15 @@ class TestService:
                                 "testCaseDescription": test.description
                             })
 
+            _suppress.__exit__(None, None, None)
+            submission.refresh_from_db(fields=['grade'])
+            last = submission.gradeSnapshots.order_by('-created').values('grade').first()
+            if last is None or last['grade'] != submission.grade:
+                SubmissionGradeSnapshot.objects.create(submission=submission, grade=submission.grade)
             return all_results
 
         except Exception as e:
+            _suppress.__exit__(None, None, None)
             logger.exception(f"Error running test suite for submission {submission_id}")
             return [{"success": False, "error": str(e)}]
 

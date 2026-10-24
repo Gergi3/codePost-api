@@ -87,17 +87,18 @@ class TestGradebookContent:
         assert _row(resp.data, s0.email)['section'] == section.name
         assert _row(resp.data, s1.email)['section'] is None
 
-    def test_assignment_cells_and_pending(self, api_client, gradebook_setup):
+    def test_assignment_cells_show_grade_regardless_of_finalization(self, api_client, gradebook_setup):
         course, hw = gradebook_setup['course'], gradebook_setup['hw']
         s0, s1 = gradebook_setup['students'][0], gradebook_setup['students'][1]
         resp = _get(api_client, gradebook_setup['admin'], course)
         graded = _cell(_row(resp.data, s0.email), 'assignment', hw.id)
         assert _dec(graded['grade']) == _dec('87.50')
         assert graded['hasSubmission'] is True and graded['isFinalized'] is True
-        # Unfinalized: the submission shows as pending but exposes no grade.
-        ungraded = _cell(_row(resp.data, s1.email), 'assignment', hw.id)
-        assert ungraded == {'assignment': hw.id, 'grade': None,
-                            'hasSubmission': True, 'isFinalized': False}
+        # Admin view: an unfinalized submission still exposes its computed grade (here the
+        # default full points, since it has no deductions) — no more "pending" hiding.
+        unfinalized = _cell(_row(resp.data, s1.email), 'assignment', hw.id)
+        assert _dec(unfinalized['grade']) == _dec('100')
+        assert unfinalized['hasSubmission'] is True and unfinalized['isFinalized'] is False
 
     def test_quiz_official_score_policy_and_per_student_max(self, api_client, gradebook_setup):
         from core.models import QuizAttempt
@@ -132,10 +133,11 @@ class TestGradebookContent:
         cell = _cell(row, 'quiz', quiz.id)
         assert cell == {'quiz': quiz.id, 'score': None, 'maxScore': None,
                         'needsGrading': True, 'hasAttempts': True}
-        # Nothing graded for this student — totals stay empty, percent null.
-        assert _dec(row['totalEarned']) == _dec('0')
-        assert _dec(row['totalPossible']) == _dec('0')
-        assert row['percent'] is None
+        # The ungraded quiz contributes nothing; totals reflect only s1's HW1 grade
+        # (100/100, now shown despite being unfinalized).
+        assert _dec(row['totalEarned']) == _dec('100')
+        assert _dec(row['totalPossible']) == _dec('100')
+        assert _dec(row['percent']) == _dec('100')
 
     def test_draft_quiz_hidden_unless_attempted(self, api_client, gradebook_setup):
         from core.models import QuizAttempt
@@ -166,6 +168,22 @@ class TestGradebookContent:
         assert _dec(row['totalEarned']) == _dec('95.50')
         assert _dec(row['totalPossible']) == _dec('110.00')
         assert _dec(row['percent']) == _dec('86.82')
+
+    def test_assignments_query_param_restricts_columns_and_totals(self, api_client, gradebook_setup):
+        course, hw = gradebook_setup['course'], gradebook_setup['hw']
+        s0 = gradebook_setup['students'][0]
+        api_client.force_authenticate(user=gradebook_setup['admin'])
+        # Restrict to HW1 only: the factory's "Loops" assignment column drops out, and s0's
+        # totals cover HW1 alone (87.50/100), independent of any other column.
+        resp = api_client.get(f'/courses/{course.id}/gradebook/?assignments={hw.id}')
+        assert resp.status_code == status.HTTP_200_OK
+        assert [a['id'] for a in resp.data['assignments']] == [hw.id]
+        row = _row(resp.data, s0.email)
+        assert _dec(row['totalEarned']) == _dec('87.50')
+        assert _dec(row['totalPossible']) == _dec('100.00')
+        # An empty value selects no assignment columns at all.
+        empty = api_client.get(f'/courses/{course.id}/gradebook/?assignments=')
+        assert empty.data['assignments'] == []
 
 
 class TestGradebookExport:

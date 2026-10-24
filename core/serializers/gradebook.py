@@ -22,9 +22,15 @@ class GradebookQuizColumnSerializer(serializers.Serializer):
 class GradebookAssignmentCellSerializer(serializers.Serializer):
   assignment = serializers.IntegerField()
   grade = serializers.DecimalField(max_digits=5, decimal_places=2, allow_null=True,
-                                   help_text="The finalized grade; null until finalized.")
+                                   help_text="The current grade; null until the submission is graded.")
   hasSubmission = serializers.BooleanField()
   isFinalized = serializers.BooleanField()
+  submissionId = serializers.IntegerField(allow_null=True,
+                                          help_text="Id of the best submission; null when no submission.")
+  personalBest = serializers.DecimalField(max_digits=5, decimal_places=2, allow_null=True,
+                                          help_text="Highest grade ever recorded for this submission.")
+  firstMaxAt = serializers.DateTimeField(allow_null=True,
+                                         help_text="Earliest timestamp when the personal-best grade was reached.")
 
 
 class GradebookQuizCellSerializer(serializers.Serializer):
@@ -46,6 +52,9 @@ class GradebookRowSerializer(serializers.Serializer):
   totalPossible = serializers.DecimalField(max_digits=10, decimal_places=2)
   percent = serializers.DecimalField(max_digits=6, decimal_places=2, allow_null=True,
                                      help_text="Earned/possible over graded work only; null when nothing is graded.")
+  completedAllMaxAt = serializers.DateTimeField(allow_null=True,
+                                                help_text="Latest firstMaxAt across assignments; the moment the student "
+                                                          "last reached their personal best on every submitted assignment.")
 
 
 class GradebookResponseSerializer(serializers.Serializer):

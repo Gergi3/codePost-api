@@ -20,6 +20,7 @@ import java.io.PrintStream;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -78,6 +79,7 @@ public class JUnitPlatformRunner {
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
         PrintStream capturing = new PrintStream(captured, true);
 
+        CollectingListener listener = new CollectingListener(results, points);
         try {
             LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
                     .selectors(DiscoverySelectors.selectClasspathRoots(
@@ -85,15 +87,54 @@ public class JUnitPlatformRunner {
                     .configurationParameter(
                             "junit.jupiter.execution.timeout.testable.method.default",
                             DEFAULT_TEST_TIMEOUT)
+                    // SEPARATE_THREAD runs each test on its own thread so the timeout can
+                    // actually abort a test stuck in an infinite loop. The default SAME_THREAD
+                    // mode only checks the deadline AFTER the test method returns, so an
+                    // infinite loop hangs until the whole container times out — losing every
+                    // result. With SEPARATE_THREAD the hung test reports a TimeoutException
+                    // and the rest of the suite still runs.
+                    .configurationParameter(
+                            "junit.jupiter.execution.timeout.thread.mode.default",
+                            "SEPARATE_THREAD")
                     .build();
 
             Launcher launcher = LauncherFactory.create();
-            CollectingListener listener = new CollectingListener(results, points);
             launcher.registerTestExecutionListeners(listener);
 
             System.setOut(capturing);
             System.setErr(capturing);
             launcher.execute(request);
+
+            // Any test still in listener.getStarted() fired executionStarted but never
+            // executionFinished — the JVM killed the worker thread (OOM, etc.) before
+            // the engine could record the result. Synthesize an error entry for each so
+            // the autograder reports it rather than silently dropping it.
+            for (TestIdentifier tid : listener.getStarted().values()) {
+                String mn = tid.getSource()
+                        .filter(s -> s instanceof MethodSource)
+                        .map(s -> ((MethodSource) s).getMethodName())
+                        .orElse(tid.getDisplayName());
+                String sc = tid.getSource()
+                        .filter(s -> s instanceof MethodSource)
+                        .map(s -> ((MethodSource) s).getClassName())
+                        .map(cn -> cn.contains(".") ? cn.substring(cn.lastIndexOf('.') + 1) : cn)
+                        .orElse("");
+                Result r = new Result();
+                r.name = mn;
+                r.className = sc;
+                r.description = "";
+                r.passed = false;
+                r.score = 0;
+                Double pts = points.get(sc + "." + mn);
+                if (pts == null) pts = points.getOrDefault(mn, 1.0);
+                r.maxScore = pts;
+                r.status = "error";
+                r.error = "Test did not complete — the JVM likely ran out of memory or was killed "
+                        + "while this test was running. Check for infinite loops, excessive memory "
+                        + "allocation, or very large data structures.";
+                r.output = "";
+                results.add(r);
+            }
         } catch (Throwable t) {
             // Discovery/launch failed (e.g. nothing compiled). Emit one synthetic
             // error so the autograder reports a real problem instead of silence.
@@ -120,15 +161,37 @@ public class JUnitPlatformRunner {
         }
 
         System.out.println("<<<TEST_RESULT_JSON_START>>>" + toJson(results) + "<<<TEST_RESULT_JSON_END>>>");
+        System.out.flush();
+
+        // Force exit: a test aborted by a SEPARATE_THREAD timeout leaves its original
+        // thread still spinning (JUnit cannot kill an uninterruptible loop). Those
+        // non-daemon threads would otherwise keep the JVM alive forever, so the
+        // container would hit its hard timeout and the results above would be lost.
+        // We have already emitted every result, so exit immediately.
+        System.exit(0);
     }
 
     static final class CollectingListener implements TestExecutionListener {
         private final List<Result> results;
         private final Map<String, Double> points;
+        // Tracks tests that fired executionStarted but not yet executionFinished.
+        // After launcher.execute() returns, any remaining entry was killed mid-run.
+        private final Map<String, TestIdentifier> started = new LinkedHashMap<>();
 
         CollectingListener(List<Result> results, Map<String, Double> points) {
             this.results = results;
             this.points = points;
+        }
+
+        Map<String, TestIdentifier> getStarted() {
+            return started;
+        }
+
+        @Override
+        public void executionStarted(TestIdentifier id) {
+            if (id.isTest()) {
+                started.put(id.getUniqueId(), id);
+            }
         }
 
         @Override
@@ -180,14 +243,32 @@ public class JUnitPlatformRunner {
                     r.passed = false;
                     r.score = 0;
                     Throwable cause = result.getThrowable().orElse(null);
-                    // opentest4j.AssertionFailedError extends java.lang.AssertionError,
-                    // so this single check cleanly separates an assertion failure
-                    // ("failed") from any other exception ("error").
-                    r.status = (cause instanceof AssertionError) ? "failed" : "error";
-                    r.error = truncate(cause != null ? messageOnly(cause) : "Test did not pass");
+                    if (cause == null) {
+                        r.status = "failed";
+                        r.error = "Test did not pass";
+                    } else if (cause instanceof java.util.concurrent.TimeoutException) {
+                        // JUnit's TimeoutExtension throws java.util.concurrent.TimeoutException
+                        // with status FAILED (not ABORTED — that's reserved for assumeTrue failures).
+                        r.status = "error";
+                        r.error = "Test timed out. Check for infinite loops or slow/expensive operations.";
+                    } else if (cause instanceof AssertionError) {
+                        // opentest4j.AssertionFailedError extends java.lang.AssertionError —
+                        // this check cleanly separates an assertion failure ("failed") from
+                        // any other exception ("error"). Message-only is clear enough for assertions.
+                        r.status = "failed";
+                        r.error = truncate(messageOnly(cause));
+                    } else {
+                        // Runtime exception (NPE, OOM caught by engine, TestAbortedException
+                        // from assumeTrue, etc.) — show type + first stack frames so students
+                        // can see exactly where their code failed.
+                        r.status = "error";
+                        r.error = truncate(stackToString(cause));
+                    }
                     break;
             }
             results.add(r);
+            // Mark this test as finished so it is not re-reported as a JVM-killed test.
+            started.remove(id.getUniqueId());
         }
     }
 

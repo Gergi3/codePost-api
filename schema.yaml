@@ -4503,8 +4503,14 @@ paths:
       operationId: courses_gradebookRetrieve
       description: |-
         The course gradebook: every active student × every assignment and quiz, with
-        totals over graded work (course admins only).
+        totals over graded work (course admins only). ``?assignments=`` restricts the
+        assignment columns and recomputes totals over the selected assignments.
       parameters:
+      - in: query
+        name: assignments
+        schema:
+          type: string
+        description: Comma-separated assignment ids to include; omit for all.
       - in: path
         name: id
         schema:
@@ -4530,8 +4536,8 @@ paths:
       operationId: courses_gradebookExportRetrieve
       description: |-
         Export the course gradebook as CSV (course admins only). Same data as the
-        gradebook endpoint: one row per active student, blank cells for pending/missing.
-        Totals are computed over the included columns only.
+        gradebook endpoint: one row per active student, blank cells for missing/ungraded
+        work. Totals are computed over the included columns only.
       parameters:
       - in: query
         name: assignments
@@ -20075,16 +20081,37 @@ components:
           exclusiveMaximum: true
           exclusiveMinimum: true
           nullable: true
-          description: The finalized grade; null until finalized.
+          description: The current grade; null until the submission is graded.
         hasSubmission:
           type: boolean
         isFinalized:
           type: boolean
+        submissionId:
+          type: integer
+          nullable: true
+          description: Id of the best submission; null when no submission.
+        personalBest:
+          type: number
+          format: double
+          maximum: 1000
+          minimum: -1000
+          exclusiveMaximum: true
+          exclusiveMinimum: true
+          nullable: true
+          description: Highest grade ever recorded for this submission.
+        firstMaxAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Earliest timestamp when the personal-best grade was reached.
       required:
       - assignment
+      - firstMaxAt
       - grade
       - hasSubmission
       - isFinalized
+      - personalBest
+      - submissionId
     GradebookAssignmentColumn:
       type: object
       properties:
@@ -20206,8 +20233,15 @@ components:
           nullable: true
           description: Earned/possible over graded work only; null when nothing is
             graded.
+        completedAllMaxAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest firstMaxAt across assignments; the moment the student
+            last reached their personal best on every submitted assignment.
       required:
       - assignmentCells
+      - completedAllMaxAt
       - percent
       - quizCells
       - section
@@ -23408,6 +23442,7 @@ components:
         className:
           type: string
           readOnly: true
+          default: ''
           description: The test class / source file (without extension) this test
             came from. Disambiguates identical functionNames across files in one category.
         timeout:
@@ -27315,6 +27350,7 @@ components:
         className:
           type: string
           readOnly: true
+          default: ''
           description: The test class / source file (without extension) this test
             came from. Disambiguates identical functionNames across files in one category.
         timeout:

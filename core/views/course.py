@@ -60,7 +60,6 @@ from core.utils import get_or_create_user
 # Can override get_serializer method to use different serializer for
 # different user types
 from core.emails import UserAddedToCourseEmail
-from core.tasks import send_user_added_to_course_email
 
 class QuizAccommodationRowSerializer(serializers.Serializer):
     """One per-student quiz accommodation: extra-time multiplier + SEB exemption."""
@@ -78,6 +77,17 @@ def generate_invite_code():
     return "".join(
         secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10)
     )
+
+
+def _gradebook_id_set(request, name):
+    """Parse a comma-separated id query param for the gradebook endpoints.
+
+    Absent → None (all); present → the listed ids (possibly the empty set).
+    """
+    if name not in request.query_params:
+        return None
+    raw = request.query_params.get(name) or ''
+    return {int(x) for x in raw.split(',') if x.strip().isdigit()}
 
 
 class CourseViewSet(SuperUserListProtectedViewSet):
@@ -461,8 +471,9 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                                 not userInRoster.is_active or not userInRoster.profile.isPasswordSet
                                 or course.emailNewUsers
                             ):
-                                send_user_added_to_course_email.delay(
-                                    userInRoster.pk,
+                                # Send inline (not via Celery) so the invitation
+                                # does not depend on a running worker.
+                                UserAddedToCourseEmail(userInRoster).send_email(
                                     course_name=course.name,
                                     course_period=course.period,
                                     user_type=roleType,
@@ -565,8 +576,8 @@ class CourseViewSet(SuperUserListProtectedViewSet):
 
             if not admin.is_active or course.emailNewUsers:
                 # Email the admin that they have been added to the course, so they can activate their account, bypasses email new users setting for course
-                send_user_added_to_course_email.delay(
-                    admin.pk,
+                # Send inline (not via Celery) so the invitation does not depend on a running worker.
+                UserAddedToCourseEmail(admin).send_email(
                     course_name=course.name,
                     course_period=course.period,
                     user_type="admin",
@@ -580,8 +591,8 @@ class CourseViewSet(SuperUserListProtectedViewSet):
         ):
             for newUser in userList:
                 if not newUser.is_active or not newUser.profile.isPasswordSet or course.emailNewUsers:
-                    send_user_added_to_course_email.delay(
-                        newUser.pk,
+                    # Send inline (not via Celery) so the invitation does not depend on a running worker.
+                    UserAddedToCourseEmail(newUser).send_email(
                         course_name=course.name,
                         course_period=course.period,
                         user_type=roleType,
@@ -1219,16 +1230,25 @@ class CourseViewSet(SuperUserListProtectedViewSet):
             {'student': student.email, 'timeMultiplier': multiplier,
              'sebExempt': seb_exempt}).data)
 
-    @extend_schema(responses=GradebookResponseSerializer)
+    @extend_schema(
+        responses=GradebookResponseSerializer,
+        parameters=[
+            OpenApiParameter(name='assignments', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY,
+                             required=False,
+                             description="Comma-separated assignment ids to include; omit for all."),
+        ],
+    )
     @action(detail=True, methods=["GET"])
     def gradebook(self, request, pk=None):
         """The course gradebook: every active student × every assignment and quiz, with
-        totals over graded work (course admins only)."""
+        totals over graded work (course admins only). ``?assignments=`` restricts the
+        assignment columns and recomputes totals over the selected assignments."""
         from core.services.gradebook import build_gradebook
         course = self.get_object()
         if not (request.user.is_superuser or isCourseAdmin(request.user, course)):
             return returnForbidden()
-        return Response(GradebookResponseSerializer(build_gradebook(course)).data)
+        return Response(GradebookResponseSerializer(
+            build_gradebook(course, assignment_ids=_gradebook_id_set(request, 'assignments'))).data)
 
     @extend_schema(responses=AssignmentSerializer(many=True))
     @action(detail=True, methods=["GET"])
@@ -1311,11 +1331,80 @@ class CourseViewSet(SuperUserListProtectedViewSet):
                              description="Restrict rows to students in this section."),
         ],
     )
+    @action(detail=True, methods=["GET"], url_path="studentGradeHistory")
+    def studentGradeHistory(self, request, pk=None):
+        """Grade snapshot timeline for one student across all course assignments.
+
+        ``?student=email`` (required) selects the student.
+        Returns a list of assignment objects, each with its snapshot list ordered
+        chronologically.  Only course admins may call this."""
+        from core.models import SubmissionGradeSnapshot
+        from datetime import datetime, timezone as _tz
+        _EPOCH = datetime(1970, 1, 1, tzinfo=_tz.utc)
+
+        user = request.user
+        if not isAuthenticated(user):
+            return returnNotAuthorized()
+        course = self.get_object()
+        if not (user.is_superuser or isCourseAdmin(user, course)):
+            return returnForbidden()
+
+        student_email = request.query_params.get('student', '').strip()
+        if not student_email:
+            return Response({'detail': 'student query param required.'}, status=400)
+
+        assignments = list(course.assignments.all())
+
+        # Best submission per assignment for this student (same logic as build_gradebook).
+        best = {}
+        sub_rows = (
+            course.assignments
+            .prefetch_related('submissions__students')
+            .values_list('id', 'submissions__students__email',
+                         'submissions__grade', 'submissions__isFinalized',
+                         'submissions__dateUploaded', 'submissions__id')
+        )
+        for a_id, email, grade, is_fin, date_up, sub_id in sub_rows:
+            if email != student_email:
+                continue
+            pref = (bool(is_fin), date_up or _EPOCH, sub_id)
+            if a_id not in best or pref > best[a_id][0]:
+                best[a_id] = (pref, grade, sub_id)
+
+        # Fetch all snapshots for those submissions in one query.
+        sub_ids = [v[2] for v in best.values() if v[2] is not None]
+        snaps_qs = (SubmissionGradeSnapshot.objects
+                    .filter(submission_id__in=sub_ids)
+                    .values('submission_id', 'grade', 'created', 'seed')
+                    .order_by('submission_id', 'created'))
+        snaps_by_sub = {}
+        for s in snaps_qs:
+            snaps_by_sub.setdefault(s['submission_id'], []).append({
+                'grade': str(s['grade']) if s['grade'] is not None else None,
+                'created': s['created'].isoformat(),
+                'seed': s['seed'],
+            })
+
+        result = []
+        for assignment in assignments:
+            found = best.get(assignment.id)
+            sub_id = found[2] if found else None
+            result.append({
+                'assignmentId': assignment.id,
+                'assignmentName': assignment.name,
+                'assignmentPoints': str(assignment.points or 0),
+                'submissionId': sub_id,
+                'currentGrade': str(found[1]) if found and found[1] is not None else None,
+                'snapshots': snaps_by_sub.get(sub_id, []) if sub_id else [],
+            })
+
+        return Response(result)
+
     @action(detail=True, methods=["GET"])
     def gradebookExport(self, request, pk=None):
         """Export the course gradebook as CSV (course admins only). Same data as the
-        gradebook endpoint: one row per active student, blank cells for pending/missing.
-        Totals are computed over the included columns only."""
+        gradebook endpoint: one row per active student, blank cells for missing/ungraded
+        work. Totals are computed over the included columns only."""
         import csv
         from django.http import HttpResponse
         from core.services.gradebook import build_gradebook
@@ -1324,16 +1413,9 @@ class CourseViewSet(SuperUserListProtectedViewSet):
         if not (request.user.is_superuser or isCourseAdmin(request.user, course)):
             return returnForbidden()
 
-        def id_set(name):
-            # Absent → None (all); present → the listed ids (possibly none).
-            if name not in request.query_params:
-                return None
-            raw = request.query_params.get(name) or ''
-            return {int(x) for x in raw.split(',') if x.strip().isdigit()}
-
         data = build_gradebook(course,
-                               assignment_ids=id_set('assignments'),
-                               quiz_ids=id_set('quizzes'),
+                               assignment_ids=_gradebook_id_set(request, 'assignments'),
+                               quiz_ids=_gradebook_id_set(request, 'quizzes'),
                                section=request.query_params.get('section') or None)
 
         response = HttpResponse(content_type='text/csv')

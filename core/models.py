@@ -9,6 +9,7 @@ import hashlib
 import base64
 import uuid
 import shutil
+import threading
 from encrypted_model_fields.fields import EncryptedCharField
 
 from django.conf import settings as django_settings
@@ -1922,6 +1923,28 @@ class SubmissionHistory(BaseModel):
     unique_together = ('submission', 'student')
     ordering = ['-created']
 
+class SubmissionGradeSnapshot(BaseModel):
+  """One snapshot of a Submission's grade at a point in time.
+
+  Written on every grade change (via post_save signal); `created` is the timestamp.
+  `seed=True` marks the single backfilled row for pre-existing submissions that had no
+  history when the feature was deployed — it should be treated as "grade at deploy time",
+  not as a real grading event.
+  """
+  if TYPE_CHECKING:
+    id: int
+    submission: Submission
+
+  submission: Submission = models.ForeignKey(  # type: ignore[assignment]
+      Submission, on_delete=models.CASCADE, related_name='gradeSnapshots')
+  grade = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+  seed = models.BooleanField(default=False)
+
+  class Meta:
+    ordering = ['created']
+    indexes = [models.Index(fields=['submission', 'created'])]
+
+
 ##################################### Autograder Models ##########################################
 
 
@@ -2306,13 +2329,57 @@ def save_submission_from_comment_delete(sender, instance, **kwargs):
 @receiver(post_save, sender=SubmissionTest)
 def save_submission_from_test(sender, instance, **kwargs):
   """Trigger grade recalculation when test results change."""
+  instance.submission._skip_snapshot = True
   instance.submission.save()
+
+
+@receiver(post_save, sender=Submission)
+def snapshot_submission_grade(sender, instance, created, **kwargs):
+  """Record a grade snapshot whenever a Submission's grade changes (or is first set).
+  Skipped during autograder batch runs (suppress_grade_snapshot context) and during
+  per-test cascade saves (_skip_snapshot flag) — callers are responsible for creating
+  one snapshot after a full run completes."""
+  if getattr(_snapshot_suppress, 'active', False):
+    return
+  if getattr(instance, '_skip_snapshot', False):
+    return
+  if not created:
+    update_fields = kwargs.get('update_fields')
+    if update_fields is not None and 'grade' not in update_fields:
+      return
+    last = instance.gradeSnapshots.order_by('-created').values('grade').first()
+    if last is not None and last['grade'] == instance.grade:
+      return
+  SubmissionGradeSnapshot.objects.create(submission=instance, grade=instance.grade)
+
+
+_snapshot_suppress = threading.local()
+
+
+class suppress_grade_snapshot:
+  """Context manager: suppress per-save snapshots during a batch autograder run.
+
+  Usage::
+
+      with suppress_grade_snapshot():
+          # save many SubmissionTests — no snapshots fired
+          ...
+      # caller is responsible for creating one snapshot after the batch completes
+      SubmissionGradeSnapshot.objects.create(submission=sub, grade=sub.grade)
+  """
+  def __enter__(self):
+    _snapshot_suppress.active = True
+    return self
+
+  def __exit__(self, *_):
+    _snapshot_suppress.active = False
 
 
 @receiver(post_delete, sender=SubmissionTest)
 def save_submission_from_test_delete(sender, instance, **kwargs):
   """Trigger grade recalculation when test results are deleted."""
   try:
+    instance.submission._skip_snapshot = True
     instance.submission.save()
   except Submission.DoesNotExist:
     pass

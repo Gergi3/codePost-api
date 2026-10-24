@@ -62,28 +62,63 @@ _COMPILE_MARKERS = re.compile(
 )
 
 
-def _sanitize_student_test_row(row: dict) -> dict:
+def _filter_log_to_student_files(logs: str, student_filenames: set) -> str:
+    """Keep only log lines that reference the student's own files.
+
+    Compiler output interleaves lines about the student's files (safe, useful —
+    e.g. "Car.java:5: error: ';' expected") with lines about instructor TEST files
+    (e.g. "TowAwayTest.java: cannot find symbol") and generic framework noise. We
+    keep a line only if it names one of the student's own files, so students see
+    their own errors without leaking hidden-test names/paths. A compiler message
+    spans multiple lines (the error line, the offending source line, a caret, and
+    sometimes "symbol:"/"location:" lines); we keep the continuation lines that
+    follow a kept error line until the next file-referencing line.
+    """
+    if not logs or not student_filenames:
+        return ''
+    kept = []
+    keeping = False
+    for line in logs.splitlines():
+        # Does this line name a file? (path ending in one of our known basenames)
+        mentions_student = any(fn in line for fn in student_filenames)
+        # A line that references a .java/.py/etc. file path we DON'T own ends a keep run.
+        mentions_other_file = ('.java:' in line or '.py:' in line) and not mentions_student
+        # Runner/VM noise that can follow the javac block but isn't the student's error.
+        is_runner_noise = line.lstrip().startswith((
+            'Error: Could not', 'Caused by:', 'Exception in thread', 'at ', 'java.lang.'))
+        if mentions_student:
+            keeping = True
+            kept.append(line)
+        elif mentions_other_file or is_runner_noise:
+            keeping = False  # switched away from the student's compiler diagnostic
+        elif keeping:
+            # Continuation of a kept compiler message (source echo, caret, symbol/location).
+            kept.append(line)
+    return '\n'.join(kept).strip()
+
+
+def _sanitize_student_test_row(row: dict, student_filenames: set | None = None) -> dict:
     """Shape a serialized SubmissionTest for a STUDENT viewer.
 
-    - Compile/couldn't-run failures collapse to a single generic message (no raw
-      compiler stderr, which can also reference instructor test files).
-    - Raw execution `logs` are always dropped (grader-only); per-test `results`
-      error/message (assertion text, runtime "Type: message") are preserved.
+    - A genuine COMPILE failure (compiler-error markers present in the log) collapses
+      to the generic "didn't compile" message PLUS the compiler lines that reference
+      the student's OWN files (their real errors), with instructor-test lines stripped.
+    - Any other errored row (OOM, timeout, a test that didn't run) keeps its own
+      per-test error/message; its raw execution log is dropped (grader-only, and it
+      can enumerate hidden test names). It is NOT mislabeled as a compile failure.
     Staff rows must NOT be passed through here.
     """
+    student_filenames = student_filenames or set()
     logs = row.get('logs') or ''
-    results = row.get('results')
-    has_test_results = bool(results) if isinstance(results, (list, dict)) else False
-    is_error = bool(row.get('isError'))
-
     looks_like_compile = _COMPILE_MARKERS.search(logs) is not None
-    # Errored with no per-test results => it never got far enough to run tests.
-    couldnt_run = is_error and not has_test_results
 
-    if looks_like_compile or couldnt_run:
-        # Collapse to a single synthetic result carrying the generic message, so the UI
-        # renders it through the normal per-test error path (status 'compile_error' tells
-        # the client not to label it as a thrown runtime exception). No raw stderr.
+    if looks_like_compile:
+        # Real compile failure. Show the generic banner + only the student's own
+        # compiler lines (never instructor test-file lines).
+        student_detail = _filter_log_to_student_files(logs, student_filenames)
+        error_text = STUDENT_COMPILE_FAILURE_MESSAGE
+        if student_detail:
+            error_text = f"{STUDENT_COMPILE_FAILURE_MESSAGE}\n\n{student_detail}"
         row['logs'] = ''
         row['isError'] = True
         row['results'] = [{
@@ -92,12 +127,29 @@ def _sanitize_student_test_row(row: dict) -> dict:
             'score': 0,
             'maxScore': row.get('maxScore') or 0,
             'status': 'compile_error',
-            'error': STUDENT_COMPILE_FAILURE_MESSAGE,
+            'error': error_text,
         }]
     else:
-        # Execution logs are grader-only; the per-test error/message carries the
-        # student-appropriate assertion/runtime detail.
+        # Not a compile failure: OOM / timeout / assertion / didn't-run. Keep the
+        # per-test results (they carry the student-appropriate message); only drop
+        # the raw execution log, which is grader-only and can list hidden tests.
         row['logs'] = ''
+        results = row.get('results')
+        has_test_results = bool(results) if isinstance(results, (list, dict)) else False
+        # An errored row with no per-test results and no compile markers is a test
+        # that was prevented from running (e.g. the JVM ran out of memory or the
+        # whole run was aborted). Give the student a clear, non-leaky message instead
+        # of a blank row — but DON'T call it a compile error.
+        if bool(row.get('isError')) and not has_test_results:
+            row['results'] = [{
+                'name': 'Did not run',
+                'passed': False,
+                'score': 0,
+                'maxScore': row.get('maxScore') or 0,
+                'status': 'error',
+                'error': "This test did not run. The program may have run out of memory, "
+                         "timed out, or crashed before this test executed.",
+            }]
     return row
 
 
@@ -503,6 +555,15 @@ class SubmissionViewSet(ListProtectedViewSet):
     # the underlying test names, logs, or explanations.
     if isStudentView:
         tests_by_id = {t.id: t for t in tests}
+        # The student's own submitted filenames (basenames). Used to keep only the
+        # compiler lines that reference their own files when surfacing a compile error.
+        student_filenames = set()
+        try:
+            for f in submission.files.all():
+                if f.name:
+                    student_filenames.add(f.name)
+        except Exception:
+            student_filenames = set()
         hidden_by_category: dict[int, list] = {}
         visible_rows = []
         for st_data in submissionTests:
@@ -512,7 +573,7 @@ class SubmissionViewSet(ListProtectedViewSet):
             else:
                 # Student-facing shaping: generic compile message + drop raw execution
                 # logs (grader-only). Assertion/runtime per-test messages are preserved.
-                visible_rows.append(_sanitize_student_test_row(st_data))
+                visible_rows.append(_sanitize_student_test_row(st_data, student_filenames))
 
         synthetic_rows = []
         for cat_id, hidden_tests in hidden_by_category.items():

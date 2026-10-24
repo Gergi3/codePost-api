@@ -53,22 +53,36 @@ class JavaExecutor(Executor):
         match = re.search(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_\.]*)\s*;", code, flags=re.MULTILINE)
         return match.group(1) if match else None
 
+    @staticmethod
+    def _check_java_filename(filename: str, code: str) -> Optional[str]:
+        """Return an error message if the filename doesn't match the declared public class.
+
+        javac requires a public class Foo to live in Foo.java exactly. Students
+        sometimes upload 'HashtagExtractor - Copy.java' or 'Main (2).java' from
+        Windows; this produces a cryptic compile error. Surface it clearly instead.
+        Returns None if the filename is acceptable.
+        """
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        m = _PUBLIC_CLASS_RE.search(code)
+        if m and m.group(1) != stem:
+            return (
+                f"File is named '{filename}' but declares 'public class {m.group(1)}'. "
+                f"Rename the file to '{m.group(1)}.java' and re-upload."
+            )
+        return None
+
     def _get_source_relative_path(self, filename: str, code: str) -> str:
         """
         Resolve where the main source file should be written inside /work.
 
         Priority:
         1) explicit file.path from DB (preserve uploaded relative structure)
-        2) package declaration-derived path when file.path is absent
-        3) filename in working directory
+        2) filename in working directory — let _NORMALIZE_SOURCES_CMD move it
+           to the right package path at runtime (avoids creating root-owned
+           package dirs via put_archive that would block the normalizer's mv)
         """
         if getattr(self.file, "path", None):
             return os.path.join(self.file.path, filename)
-
-        package_name = self._extract_package_name(code)
-        if package_name:
-            package_path = package_name.replace(".", "/")
-            return os.path.join(package_path, filename)
 
         return filename
 
@@ -87,18 +101,26 @@ class JavaExecutor(Executor):
 
     # --- JUnit (Jupiter) execution path -------------------------------------
 
-    # Shell that moves every package-declared .java file into its package dir so
-    # javac resolves cross-file references regardless of upload layout. Shared by
-    # the legacy and JUnit paths. JUnitPlatformRunner has no package → stays at root.
+    # Shell that places a package-declared .java file into its package dir ONLY when
+    # it isn't already correctly located. A file is already correct when its directory
+    # ends with the package path (e.g. a strict `src/bg/.../Car.java` layout, or any
+    # source root prefix) — those are left untouched. Only a genuinely flat upload
+    # (`./Car.java` declaring `package bg...;`) is moved so javac + classpath resolve.
+    # JUnitPlatformRunner has no package → never matches, stays at root.
+    # Uses `find | while read` (not `for f in $(find ...)`) so filenames with spaces
+    # (e.g. "Main - Copy.java") don't split into multiple tokens.
     _NORMALIZE_SOURCES_CMD = (
-        "for f in $(find . -type f -name '*.java'); do "
-        "pkg=$(sed -n \"s/^[[:space:]]*package[[:space:]]\\+\\([A-Za-z_][A-Za-z0-9_\\.]*\\)[[:space:]]*;.*/\\1/p\" \"$f\" | head -n 1); "
+        "find . -type f -name '*.java' | while IFS= read -r f; do "
+        "pkg=$(sed -n \"s/^[[:space:]]*package[[:space:]][[:space:]]*\\([A-Za-z_][A-Za-z0-9_.]*\\)[[:space:]]*;.*/\\1/p\" \"$f\" | head -n 1); "
         "if [ -n \"$pkg\" ]; then "
         "pkg_path=$(printf '%s' \"$pkg\" | tr '.' '/'); "
-        "target=./$pkg_path/$(basename \"$f\"); "
-        "if [ \"$f\" != \"$target\" ]; then "
-        "mkdir -p \"$(dirname \"$target\")\" && mv \"$f\" \"$target\"; "
-        "fi; "
+        "dir=$(dirname \"$f\"); "
+        # Already correct if the file's directory ends with its package path — i.e.
+        # it lives under some source root (./src/bg/..., ./bg/..., etc.). Leave it.
+        "case \"$dir/\" in "
+        "*\"/$pkg_path/\") : ;; "
+        "*) mkdir -p \"./$pkg_path\" && mv -f \"$f\" \"./$pkg_path/$(basename \"$f\")\"; ;; "
+        "esac; "
         "fi; "
         "done"
     )
@@ -205,8 +227,25 @@ class JavaExecutor(Executor):
 
         # 3. Co-compilation guard: a student file must not redefine a test class or
         #    shadow framework packages. Checked against every test file.
+        filename = self.file.name
+        if not filename.endswith(".java"):
+            filename += ".java"
+
+        # Validate the filename of EVERY student .java file (the representative plus
+        # every additional submission file), not just the representative: a public
+        # class must live in <ClassName>.java or javac fails with a cryptic error.
+        # self.additional_files is {full_path: source}; the representative is self.file.
+        student_files = {filename: code}
+        for full_path, data in (self.additional_files or {}).items():
+            if full_path.endswith(".java"):
+                student_files[os.path.basename(full_path)] = data
+        for fname, src in student_files.items():
+            filename_err = self._check_java_filename(fname, src)
+            if filename_err:
+                return ExecutionResult.error(filename_err)
+
         for tf in test_files:
-            guard_err = self._junit_cocompile_guard(code, self.file.name or "Main.java", tf['content'])
+            guard_err = self._junit_cocompile_guard(code, filename, tf['content'])
             if guard_err:
                 return ExecutionResult.error(guard_err)
 
@@ -235,9 +274,6 @@ class JavaExecutor(Executor):
         volumes = self._get_volume_mounts(temp_staging_dir if self.datasets else "")
         docker_env = self._get_docker_environment()
 
-        filename = self.file.name or "Main.java"
-        if not filename.endswith(".java"):
-            filename += ".java"
         source_relative_path = self._get_source_relative_path(filename, code)
 
         runner_files = {
@@ -251,7 +287,7 @@ class JavaExecutor(Executor):
         cmd_str = (
             f"{self._NORMALIZE_SOURCES_CMD} && "
             f"mkdir -p out && "
-            f"javac -cp '{libs}' -d out $(find . -type f -name '*.java') && "
+            f"find . -type f -name '*.java' -print0 | xargs -0 javac -cp '{libs}' -d out && "
             f"agent=$(ls /opt/codepost/libs/byte-buddy-agent-*.jar 2>/dev/null | head -n 1); "
             f"java -ea ${{agent:+-javaagent:$agent}} -Xmx512m -XX:MaxMetaspaceSize=128m "
             f"-cp '{libs}:out' JUnitPlatformRunner"
@@ -335,9 +371,12 @@ class JavaExecutor(Executor):
             return self._execute_junit5(start_time)
 
         code = self.file.data
-        filename = self.file.name or "Main.java"
+        filename = self.file.name
         if not filename.endswith(".java"):
             filename += ".java"
+        filename_err = self._check_java_filename(filename, code)
+        if filename_err:
+            return ExecutionResult.error(filename_err)
 
         source_relative_path = self._get_source_relative_path(filename, code)
         package_name = self._extract_package_name(code)
@@ -367,20 +406,9 @@ class JavaExecutor(Executor):
         # Normalize package-declared Java sources into package paths so javac can
         # resolve cross-file references (e.g., Main.java -> Helper.java) even when
         # files were uploaded at the workspace root.
-        normalize_sources_cmd = (
-            "for f in $(find . -type f -name '*.java'); do "
-            "pkg=$(sed -n \"s/^[[:space:]]*package[[:space:]]\\+\\([A-Za-z_][A-Za-z0-9_\\.]*\\)[[:space:]]*;.*/\\1/p\" \"$f\" | head -n 1); "
-            "if [ -n \"$pkg\" ]; then "
-            "pkg_path=$(printf '%s' \"$pkg\" | tr '.' '/'); "
-            "target=./$pkg_path/$(basename \"$f\"); "
-            "if [ \"$f\" != \"$target\" ]; then "
-            "mkdir -p \"$(dirname \"$target\")\" && mv \"$f\" \"$target\"; "
-            "fi; "
-            "fi; "
-            "done"
-        )
+        normalize_sources_cmd = self._NORMALIZE_SOURCES_CMD
 
-        compile_all_cmd = "javac -d . $(find . -type f -name '*.java')"
+        compile_all_cmd = "find . -type f -name '*.java' -print0 | xargs -0 javac -d ."
         
         if self.test_code:
             # --- Testing Mode ---

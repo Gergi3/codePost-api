@@ -31,6 +31,10 @@ def _injected(additional_files):
         dest, archive = call.args
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             for member in tar.getmembers():
+                # Directory entries (emitted so intermediate dirs are codepost-owned)
+                # carry no content — skip them; we only collect regular files.
+                if not member.isfile():
+                    continue
                 extracted = tar.extractfile(member)
                 assert extracted is not None
                 files[f"{dest.rstrip('/')}/{member.name}"] = extracted.read()
